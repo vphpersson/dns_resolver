@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"os"
+	"time"
 )
 
 func main() {
@@ -48,6 +49,8 @@ func main() {
 			remoteTcpServerAddress,
 		)
 	}
+
+	tcpResolver.Cache.StartJanitor(5 * time.Minute)
 
 	// TODO: Add (diagnostic) HTTP server as well?
 

@@ -94,7 +94,6 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		}()
 
 		r.Cache.Set(cacheKey, response, dnsContext.Time)
-		r.Cache.StartJanitor(5 * time.Minute)
 	} else {
 		cacheHit = false
 	}
