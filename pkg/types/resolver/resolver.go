@@ -12,6 +12,7 @@ import (
 	dnsUtilsTypes "github.com/Motmedel/dns_utils/pkg/types"
 	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	motmedelTlsContext "github.com/Motmedel/utils_go/pkg/tls/context"
 	"github.com/miekg/dns"
 	"log/slog"
 	"strings"
@@ -78,19 +79,19 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	if !cacheHit || response == nil {
 		var err error
 		var dnsContext dnsUtilsTypes.DnsContext
-		ctxWithDns := dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext)
+		ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext))
 
-		response, err = dns_utils.Exchange(ctxWithDns, request, r.Client, r.ServerAddress)
+		response, err = dns_utils.Exchange(ctxWithTlsDns, request, r.Client, r.ServerAddress)
 		if err != nil && !errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
 			slog.ErrorContext(
-				motmedelContext.WithErrorContextValue(ctxWithDns, err),
+				motmedelContext.WithErrorContextValue(ctxWithTlsDns, err),
 				"An error occurred when handling a request.",
 			)
 			return
 		}
 
 		defer func() {
-			slog.InfoContext(ctxWithDns, "A DNS request was forwarded.")
+			slog.InfoContext(ctxWithTlsDns, "A DNS request was forwarded.")
 		}()
 
 		r.Cache.Set(cacheKey, response, dnsContext.Time)

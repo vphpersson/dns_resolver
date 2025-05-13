@@ -54,7 +54,7 @@ func main() {
 
 	// TODO: Add (diagnostic) HTTP server as well?
 
-	for _, localServerAddress := range []string{"127.0.0.1:53", "192.168.1.1:53", "192.168.1.2:53", "192.168.1.3:53"} {
+	for _, localServerAddress := range []string{"127.0.0.1:53", "192.168.1.1:53", "192.168.2.1:53", "192.168.3.1:53"} {
 		for _, transportProtocol := range []string{"udp", "tcp"} {
 			errGroup.Go(
 				func() error {
