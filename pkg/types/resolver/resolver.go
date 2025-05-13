@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	dnsResolverErrors "dns_resolver/pkg/errors"
 	"dns_resolver/pkg/types/cache"
 	"errors"
 	"fmt"
@@ -30,45 +31,50 @@ type Resolver struct {
 
 func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg) {
 	if request == nil {
-		slog.Warn("Empty request.")
+		slog.WarnContext(
+			motmedelContext.WithErrorContextValue(
+				context.Background(),
+				motmedelErrors.NewWithTrace(fmt.Errorf("%w (request)", dnsUtilsErrors.ErrNilMessage)),
+			),
+			"Empty request.",
+		)
 		return
 	}
 
 	requestQuestions := request.Question
 	if len(requestQuestions) == 0 {
-		slog.Warn("No request questions.")
+		slog.WarnContext(
+			motmedelContext.WithErrorContextValue(
+				context.Background(),
+				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNoQuestions),
+			),
+			"No request questions.",
+		)
 		return
 	}
 
 	remoteAddr := responseWriter.RemoteAddr()
 	if remoteAddr == nil {
-		slog.Error("No remote address.")
+		slog.WarnContext(
+			motmedelContext.WithErrorContextValue(
+				context.Background(),
+				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNilRemoteAddress),
+			),
+			"Empty remote address.",
+		)
 		return
 	}
 
 	cacheKey := getCacheKey(requestQuestions[0])
 	transportProtocol := remoteAddr.Network()
-	var forwardedCtxWithDns *context.Context
 
 	var response *dns.Msg
 
-	if cachedResponseCopy, ok := r.Cache.Get(cacheKey); ok {
-		cachedResponseCopy.Id = request.Id
-
-		if transportProtocol == "udp" {
-			bufferSize := uint16(512)
-			if opt := request.IsEdns0(); opt != nil {
-				bufferSize = opt.UDPSize()
-			}
-
-			cachedResponseCopy.Truncate(int(bufferSize))
-		}
-
-		response = cachedResponseCopy
-	} else {
+	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
+	if !cacheHit || response == nil {
 		var err error
-		ctxWithDns := dnsUtilsContext.WithDnsContext(r.ParentContext)
-		forwardedCtxWithDns = &ctxWithDns
+		var dnsContext dnsUtilsTypes.DnsContext
+		ctxWithDns := dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext)
 
 		response, err = dns_utils.Exchange(ctxWithDns, request, r.Client, r.ServerAddress)
 		if err != nil && !errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
@@ -79,8 +85,44 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 			return
 		}
 
-		r.Cache.Set(cacheKey, response)
+		defer func() {
+			slog.InfoContext(ctxWithDns, "A DNS request was forwarded.")
+		}()
+
+		r.Cache.Set(cacheKey, response, dnsContext.Time)
 		r.Cache.StartJanitor(5 * time.Minute)
+	} else {
+		cacheHit = false
+	}
+
+	if response == nil {
+		slog.WarnContext(
+			motmedelContext.WithErrorContextValue(
+				context.Background(),
+				motmedelErrors.NewWithTrace(fmt.Errorf("%w (response)", dnsUtilsErrors.ErrNilMessage)),
+			),
+			"Empty response.",
+		)
+		return
+	}
+
+	if cacheHit {
+		response = response.Copy()
+		response.Id = request.Id
+		dns_utils.ApplyRemainingTtl(response, uint32(remainingTtl))
+	}
+
+	if transportProtocol == "udp" {
+		bufferSize := uint16(512)
+		if opt := request.IsEdns0(); opt != nil {
+			bufferSize = opt.UDPSize()
+		}
+
+		if !cacheHit {
+			response = response.Copy()
+		}
+
+		response.Truncate(int(bufferSize))
 	}
 
 	var dnsResolverServerAddress string
@@ -101,32 +143,19 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		},
 	)
 
-	var writeErr error
+	if err := responseWriter.WriteMsg(response); err != nil {
+		slog.ErrorContext(
+			motmedelContext.WithErrorContextValue(
+				ctxWithDns,
+				motmedelErrors.New(fmt.Errorf("response writer write msg: %w", err), response),
+			),
+			"An error occurred when writing a response.",
+		)
 
-	defer func() {
-		if ctx := forwardedCtxWithDns; ctx != nil {
-			slog.InfoContext(*ctx, "A DNS request was forwarded.")
-		}
-
-		if writeErr == nil {
-			slog.InfoContext(ctxWithDns, "A request was handled.")
-		}
-	}()
-
-	if response == nil {
-		writeErr = fmt.Errorf("%w (response)", dnsUtilsErrors.ErrNilMessage)
-	} else {
-		writeErr = responseWriter.WriteMsg(response)
-		if writeErr != nil {
-			slog.ErrorContext(
-				motmedelContext.WithErrorContextValue(
-					ctxWithDns,
-					motmedelErrors.New(fmt.Errorf("response writer write msg: %w", writeErr), response),
-				),
-				"An error occurred when writing a response.",
-			)
-		}
+		return
 	}
+
+	slog.InfoContext(ctxWithDns, "A request was handled.")
 }
 
 func New(ctx context.Context, client *dns.Client, serverAddress string) (*Resolver, error) {

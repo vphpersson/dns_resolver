@@ -2,12 +2,11 @@ package cache
 
 import (
 	"context"
+	"github.com/Motmedel/dns_utils/pkg/dns_utils"
 	"github.com/miekg/dns"
 	"sync"
 	"time"
 )
-
-const max32 = ^uint32(0)
 
 type Entry struct {
 	Msg        *dns.Msg
@@ -26,43 +25,51 @@ func New(ctx context.Context) *Cache {
 }
 
 // Get returns a *copy* whose TTLs are already aged down.
-func (c *Cache) Get(key string) (*dns.Msg, bool) {
+func (c *Cache) Get(key string) (*dns.Msg, bool, time.Duration) {
 	c.RLock()
 	entry, ok := c.entries[key]
 	c.RUnlock()
 	if !ok {
-		return nil, false
+		return nil, false, 0
 	}
 
-	remain := time.Until(entry.Expiration)
-	if remain <= 0 {
+	remainingTtl := time.Until(entry.Expiration)
+	if remainingTtl <= 0 {
 		c.Lock()
 		defer c.Unlock()
 		delete(c.entries, key)
 
-		return nil, false
+		return nil, false, 0
 	}
 
-	out := entry.Msg.Copy()
-	applyRemainingTTL(out, uint32(remain.Seconds()))
-	return out, true
+	return entry.Msg, true, remainingTtl
 }
 
 // Set stores a deep copy and records when it must expire.
-func (c *Cache) Set(key string, msg *dns.Msg) {
-	if msg.Truncated {
-		return
+func (c *Cache) Set(key string, message *dns.Msg, expirationReference *time.Time) bool {
+	if message == nil {
+		return false
 	}
 
-	ttl := effectiveTTL(msg)
+	if expirationReference == nil {
+		t := time.Now()
+		expirationReference = &t
+	}
+
+	if message.Truncated {
+		return false
+	}
+
+	ttl := dns_utils.EffectiveMessageTtl(message)
 	if ttl == 0 {
-		return
+		return false
 	}
 
 	c.Lock()
 	defer c.Unlock()
-	// TODO: Don't use `time.Now()`? Obtain from somewhere else?
-	c.entries[key] = &Entry{Msg: msg.Copy(), Expiration: time.Now().Add(ttl)}
+	c.entries[key] = &Entry{Msg: message, Expiration: expirationReference.Add(ttl)}
+
+	return true
 }
 
 func (c *Cache) StartJanitor(every time.Duration) {
@@ -89,52 +96,4 @@ func (c *Cache) StartJanitor(every time.Duration) {
 			}
 		}
 	}
-}
-
-// --------------------------------------------------------------
-// Helper functions
-
-// effectiveTTL returns the minimum TTL across Answer, Ns & Extra.
-// Includes RFC 2308 negative-cache logic.
-func effectiveTTL(m *dns.Msg) time.Duration {
-	minValue := max32
-	sweep := func(resourceRecords []dns.RR) {
-		for _, resourceRecord := range resourceRecords {
-			switch resourceRecord.(type) {
-			case *dns.OPT, *dns.TSIG, *dns.SIG:
-				continue
-			default:
-				ttl := resourceRecord.Header().Ttl
-				if ttl < minValue {
-					minValue = ttl
-				}
-			}
-		}
-	}
-	sweep(m.Answer)
-	sweep(m.Ns)
-	sweep(m.Extra)
-
-	// NXDOMAIN / NODATA – use SOA.MINIMUM if smaller
-	if m.Rcode == dns.RcodeNameError || len(m.Answer) == 0 {
-		for _, rr := range m.Ns {
-			if soa, ok := rr.(*dns.SOA); ok && soa.Minttl < minValue {
-				minValue = soa.Minttl
-			}
-		}
-	}
-
-	return time.Duration(minValue) * time.Second
-}
-
-// applyRemainingTTL rewrites every RR TTL to the remaining seconds.
-func applyRemainingTTL(m *dns.Msg, secs uint32) {
-	update := func(rrs []dns.RR) {
-		for _, rr := range rrs {
-			rr.Header().Ttl = secs
-		}
-	}
-	update(m.Answer)
-	update(m.Ns)
-	update(m.Extra)
 }
