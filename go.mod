@@ -6,7 +6,7 @@ toolchain go1.24.2
 
 require (
 	github.com/Motmedel/dns_utils v0.0.41
-	github.com/Motmedel/dns_utils/pkg/log v0.0.8
+	github.com/Motmedel/dns_utils/pkg/log v0.0.9
 	github.com/Motmedel/ecs_go v0.0.62
 	github.com/Motmedel/utils_go v0.0.202
 	github.com/miekg/dns v1.1.66
