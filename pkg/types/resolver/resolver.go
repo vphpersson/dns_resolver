@@ -65,12 +65,16 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		return
 	}
 
-	cacheKey := getCacheKey(requestQuestions[0])
-	transportProtocol := remoteAddr.Network()
+	// Obtain a response.
 
 	var response *dns.Msg
+	cacheKey := getCacheKey(requestQuestions[0])
 
 	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
+	if cacheHit && response != nil {
+		response = response.Copy()
+	}
+
 	if !cacheHit || response == nil {
 		var err error
 		var dnsContext dnsUtilsTypes.DnsContext
@@ -106,11 +110,16 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		return
 	}
 
+	// Apply changes to the response so that it can be used with the request.
+
+	response = response.Copy()
+	response.Id = request.Id
+
 	if cacheHit {
-		response = response.Copy()
-		response.Id = request.Id
 		dns_utils.ApplyRemainingTtl(response, uint32(remainingTtl))
 	}
+
+	transportProtocol := remoteAddr.Network()
 
 	if transportProtocol == "udp" {
 		bufferSize := uint16(512)
@@ -118,12 +127,10 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 			bufferSize = opt.UDPSize()
 		}
 
-		if !cacheHit {
-			response = response.Copy()
-		}
-
 		response.Truncate(int(bufferSize))
 	}
+
+	// Write the response.
 
 	var dnsResolverServerAddress string
 	if localAddr := responseWriter.LocalAddr(); localAddr != nil {
