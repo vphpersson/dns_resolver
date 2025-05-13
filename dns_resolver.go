@@ -50,7 +50,7 @@ func main() {
 		)
 	}
 
-	tcpResolver.Cache.StartJanitor(5 * time.Minute)
+	go tcpResolver.Cache.StartJanitor(5 * time.Minute)
 
 	// TODO: Add (diagnostic) HTTP server as well?
 
