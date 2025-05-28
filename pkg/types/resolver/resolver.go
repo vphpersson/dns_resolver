@@ -14,7 +14,11 @@ import (
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
 	motmedelTlsContext "github.com/Motmedel/utils_go/pkg/tls/context"
 	"github.com/miekg/dns"
+	"github.com/vphpersson/connection_pool/pkg/connection_pool"
+	connectionPoolErrors "github.com/vphpersson/connection_pool/pkg/errors"
+	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 )
@@ -24,17 +28,18 @@ func getCacheKey(q dns.Question) string {
 }
 
 type Resolver struct {
-	ParentContext context.Context
-	Client        *dns.Client
-	ServerAddress string
-	Cache         *cache.Cache
+	ParentContext  context.Context
+	Client         *dns.Client
+	ServerAddress  string
+	Cache          *cache.Cache
+	ConnectionPool *connection_pool.ConnectionPool[*dns.Conn]
 }
 
 func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg) {
 	if request == nil {
 		slog.WarnContext(
 			motmedelContext.WithErrorContextValue(
-				context.Background(),
+				r.ParentContext,
 				motmedelErrors.NewWithTrace(fmt.Errorf("%w (request)", dnsUtilsErrors.ErrNilMessage)),
 			),
 			"Empty request.",
@@ -46,7 +51,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	if len(requestQuestions) == 0 {
 		slog.WarnContext(
 			motmedelContext.WithErrorContextValue(
-				context.Background(),
+				r.ParentContext,
 				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNoQuestions),
 			),
 			"No request questions.",
@@ -58,7 +63,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	if remoteAddr == nil {
 		slog.WarnContext(
 			motmedelContext.WithErrorContextValue(
-				context.Background(),
+				r.ParentContext,
 				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNilRemoteAddress),
 			),
 			"Empty remote address.",
@@ -72,37 +77,77 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	cacheKey := getCacheKey(requestQuestions[0])
 
 	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
-	if cacheHit && response != nil {
-		response = response.Copy()
-	}
-
 	if !cacheHit || response == nil {
-		var err error
-		var dnsContext dnsUtilsTypes.DnsContext
-		ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext))
-
-		response, err = dns_utils.Exchange(ctxWithTlsDns, request, r.Client, r.ServerAddress)
-		if err != nil && !errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
+		connectionPool := r.ConnectionPool
+		if connectionPool == nil {
 			slog.ErrorContext(
-				motmedelContext.WithErrorContextValue(ctxWithTlsDns, err),
-				"An error occurred when handling a request.",
+				motmedelContext.WithErrorContextValue(
+					r.ParentContext,
+					motmedelErrors.NewWithTrace(connectionPoolErrors.ErrNilConnectionPool),
+				),
+				"The connection pool is nil.",
 			)
 			return
 		}
 
-		defer func() {
-			slog.InfoContext(ctxWithTlsDns, "A DNS request was forwarded.")
-		}()
+		if opt := request.IsEdns0(); opt != nil {
+			opt.Option = append(
+				opt.Option,
+				&dns.EDNS0_TCP_KEEPALIVE{
+					Code:    dns.EDNS0TCPKEEPALIVE,
+					Timeout: 30,
+				},
+			)
+		}
 
-		r.Cache.Set(cacheKey, response, dnsContext.Time)
-	} else {
-		cacheHit = false
+		for range connectionPool.MaxNumConnections + 1 {
+			done := func() bool {
+				var err error
+
+				connection, err := connectionPool.Get()
+				defer connectionPool.Put(r.ParentContext, connection, err)
+				if err != nil {
+					slog.ErrorContext(
+						motmedelContext.WithErrorContextValue(
+							r.ParentContext,
+							motmedelErrors.NewWithTrace(
+								fmt.Errorf("connection pool get: %w", err),
+								connectionPool,
+							),
+						),
+						"An error occurred when obtaining a connection from the connection pool.",
+					)
+					return false
+				}
+
+				var dnsContext dnsUtilsTypes.DnsContext
+				ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext))
+
+				response, err = dns_utils.ExchangeWithConn(ctxWithTlsDns, request, r.Client, connection)
+				if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
+					slog.InfoContext(ctxWithTlsDns, "A DNS request was forwarded.")
+					r.Cache.Set(cacheKey, response, dnsContext.Time)
+					return true
+				} else {
+					if !errors.Is(err, io.EOF) {
+						slog.ErrorContext(
+							motmedelContext.WithErrorContextValue(ctxWithTlsDns, err),
+							"An error occurred when exchanging with the DNS server.",
+						)
+					}
+					return false
+				}
+			}()
+			if done {
+				break
+			}
+		}
 	}
 
 	if response == nil {
 		slog.WarnContext(
 			motmedelContext.WithErrorContextValue(
-				context.Background(),
+				r.ParentContext,
 				motmedelErrors.NewWithTrace(fmt.Errorf("%w (response)", dnsUtilsErrors.ErrNilMessage)),
 			),
 			"Empty response.",
@@ -116,7 +161,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	response.Id = request.Id
 
 	if cacheHit {
-		dns_utils.ApplyRemainingTtl(response, uint32(remainingTtl))
+		dns_utils.ApplyRemainingTtl(response, uint32(max(int64(0), min(int64(remainingTtl.Seconds()), int64(math.MaxUint32)))))
 	}
 
 	transportProtocol := remoteAddr.Network()
@@ -165,6 +210,16 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	slog.InfoContext(ctxWithDns, "A request was handled.")
 }
 
+func (r *Resolver) Close() error {
+	if connectionPool := r.ConnectionPool; connectionPool != nil {
+		if err := connectionPool.Close(); err != nil {
+			return motmedelErrors.New(fmt.Errorf("connection pool close: %w", err), connectionPool)
+		}
+	}
+
+	return nil
+}
+
 func New(ctx context.Context, client *dns.Client, serverAddress string) (*Resolver, error) {
 	if client == nil {
 		return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrNilDnsClient)
@@ -174,5 +229,40 @@ func New(ctx context.Context, client *dns.Client, serverAddress string) (*Resolv
 		return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrEmptyDnsServer)
 	}
 
-	return &Resolver{ParentContext: ctx, Client: client, ServerAddress: serverAddress, Cache: cache.New(ctx)}, nil
+	resolver := Resolver{
+		ParentContext: ctx,
+		Client:        client,
+		ServerAddress: serverAddress,
+		Cache:         cache.New(ctx),
+	}
+
+	resolver.ConnectionPool = connection_pool.New[*dns.Conn](
+		func() (*dns.Conn, error) {
+			resolverClient := resolver.Client
+			if resolverClient == nil {
+				return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrNilDnsClient)
+			}
+
+			resolverServerAddress := resolver.ServerAddress
+			if resolverServerAddress == "" {
+				return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrEmptyDnsServer)
+			}
+
+			connection, err := resolverClient.Dial(resolverServerAddress)
+			if err != nil {
+				return nil, motmedelErrors.NewWithTrace(
+					fmt.Errorf("client dial: %w", err),
+					resolverClient,
+					resolverServerAddress,
+				)
+			}
+			if connection == nil {
+				return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrNilConnection)
+			}
+
+			return connection, nil
+		},
+	)
+
+	return &resolver, nil
 }

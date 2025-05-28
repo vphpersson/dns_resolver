@@ -19,12 +19,10 @@ type Cache struct {
 	entries map[string]*Entry
 }
 
-// New initialises the map and starts an optional sweeper.
 func New(ctx context.Context) *Cache {
 	return &Cache{ctx: ctx, entries: make(map[string]*Entry)}
 }
 
-// Get returns a *copy* whose TTLs are already aged down.
 func (c *Cache) Get(key string) (*dns.Msg, bool, time.Duration) {
 	c.RLock()
 	entry, ok := c.entries[key]
@@ -45,7 +43,6 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, time.Duration) {
 	return entry.Msg, true, remainingTtl
 }
 
-// Set stores a deep copy and records when it must expire.
 func (c *Cache) Set(key string, message *dns.Msg, expirationReference *time.Time) bool {
 	if message == nil {
 		return false

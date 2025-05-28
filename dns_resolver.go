@@ -10,6 +10,7 @@ import (
 	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
 	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
 	"github.com/miekg/dns"
+	"github.com/tdewolff/argp"
 	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"os"
@@ -17,6 +18,8 @@ import (
 )
 
 func main() {
+	var logLevel slog.LevelVar
+
 	logger := &motmedelErrorLogger.Logger{
 		Logger: slog.New(
 			&motmedelLog.ContextHandler{
@@ -24,7 +27,7 @@ func main() {
 					os.Stdout,
 					&slog.HandlerOptions{
 						AddSource:   false,
-						Level:       slog.LevelInfo,
+						Level:       &logLevel,
 						ReplaceAttr: ecs.TimestampReplaceAttr,
 					},
 				),
@@ -37,32 +40,60 @@ func main() {
 	}
 	slog.SetDefault(logger.Logger)
 
-	remoteTcpServerAddress := "1.1.1.1:853"
+	var verbose int
+	var listenAddresses []string
+	forwardAddress := "1.1.1.1:853"
+
+	cmd := argp.New("dns resolver")
+	cmd.AddOpt(argp.Count{I: &verbose}, "v", "verbose", "Increase verbosity, eg. -vvv")
+	cmd.AddOpt(&forwardAddress, "f", "forward", "Forward address")
+	cmd.AddRest(&listenAddresses, "listen", "Listen address")
+	cmd.Parse()
+
+	if verbose > 0 {
+		logLevel.Set(slog.LevelDebug)
+	}
+
+	if forwardAddress == "" {
+		logger.FatalWithExitingMessage("The forward address is empty.", nil)
+	}
+
+	if len(listenAddresses) == 0 {
+		logger.FatalWithExitingMessage("No listen addresses.", nil)
+	}
 
 	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
 
-	tcpResolver, err := resolver.New(errGroupCtx, &dns.Client{Net: "tcp-tls"}, remoteTcpServerAddress)
+	tcpResolver, err := resolver.New(errGroupCtx, &dns.Client{Net: "tcp-tls"}, forwardAddress)
 	if err != nil {
 		logger.FatalWithExitingMessage(
 			"An error occurred when creating the TCP resolver.",
 			err,
-			remoteTcpServerAddress,
+			forwardAddress,
 		)
 	}
+	defer func() {
+		if err := tcpResolver.Close(); err != nil {
+			logger.Warning(
+				"An error occurred when closing the resolver.",
+				motmedelErrors.New(fmt.Errorf("resolver close: %w", err), tcpResolver),
+			)
+		}
+	}()
 
 	go tcpResolver.Cache.StartJanitor(5 * time.Minute)
 
 	// TODO: Add (diagnostic) HTTP server as well?
 
-	for _, localServerAddress := range []string{"127.0.0.1:53", "192.168.1.1:53", "192.168.2.1:53", "192.168.3.1:53"} {
+	for _, listenAddress := range listenAddresses {
 		for _, transportProtocol := range []string{"udp", "tcp"} {
 			errGroup.Go(
 				func() error {
-					server := &dns.Server{Addr: localServerAddress, Net: transportProtocol, Handler: tcpResolver}
+					server := &dns.Server{Addr: listenAddress, Net: transportProtocol, Handler: tcpResolver}
 					if err := server.ListenAndServe(); err != nil {
 						return motmedelErrors.NewWithTrace(
 							fmt.Errorf("dns server listen and serve (%s): %w", transportProtocol, err),
-							localServerAddress,
+							listenAddress,
 						)
 					}
 					return nil
