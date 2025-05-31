@@ -16,7 +16,6 @@ import (
 	"github.com/miekg/dns"
 	"github.com/vphpersson/connection_pool/pkg/connection_pool"
 	connectionPoolErrors "github.com/vphpersson/connection_pool/pkg/errors"
-	"io"
 	"log/slog"
 	"math"
 	"strings"
@@ -90,22 +89,16 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 			return
 		}
 
-		if opt := request.IsEdns0(); opt != nil {
-			opt.Option = append(
-				opt.Option,
-				&dns.EDNS0_TCP_KEEPALIVE{
-					Code:    dns.EDNS0TCPKEEPALIVE,
-					Timeout: 30,
-				},
-			)
-		}
-
 		for range connectionPool.MaxNumConnections + 1 {
 			done := func() bool {
 				var err error
+				var connection *dns.Conn
 
-				connection, err := connectionPool.Get()
-				defer connectionPool.Put(r.ParentContext, connection, err)
+				connection, err = connectionPool.Get()
+				defer func() {
+					connectionPool.Put(r.ParentContext, connection, err)
+				}()
+
 				if err != nil {
 					slog.ErrorContext(
 						motmedelContext.WithErrorContextValue(
@@ -129,7 +122,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 					r.Cache.Set(cacheKey, response, dnsContext.Time)
 					return true
 				} else {
-					if !errors.Is(err, io.EOF) {
+					if !motmedelErrors.IsClosedError(err) {
 						slog.ErrorContext(
 							motmedelContext.WithErrorContextValue(ctxWithTlsDns, err),
 							"An error occurred when exchanging with the DNS server.",
@@ -145,7 +138,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	}
 
 	if response == nil {
-		slog.WarnContext(
+		slog.ErrorContext(
 			motmedelContext.WithErrorContextValue(
 				r.ParentContext,
 				motmedelErrors.NewWithTrace(fmt.Errorf("%w (response)", dnsUtilsErrors.ErrNilMessage)),
@@ -233,7 +226,7 @@ func New(ctx context.Context, client *dns.Client, serverAddress string) (*Resolv
 		ParentContext: ctx,
 		Client:        client,
 		ServerAddress: serverAddress,
-		Cache:         cache.New(ctx),
+		Cache:         cache.New(),
 	}
 
 	resolver.ConnectionPool = connection_pool.New[*dns.Conn](
