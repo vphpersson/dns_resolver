@@ -41,12 +41,16 @@ func main() {
 	slog.SetDefault(logger.Logger)
 
 	var verbose int
+	var forwardAddress string
+	var serverName string
+	var mode string
 	var listenAddresses []string
-	forwardAddress := "1.1.1.1:853"
 
 	cmd := argp.New("dns resolver")
 	cmd.AddOpt(argp.Count{I: &verbose}, "v", "verbose", "Increase verbosity, eg. -vvv")
 	cmd.AddOpt(&forwardAddress, "f", "forward", "Forward address")
+	cmd.AddOpt(&serverName, "s", "server", "Server name")
+	cmd.AddArg(&mode, "mode", "The mode (dot or doq)")
 	cmd.AddRest(&listenAddresses, "listen", "Listen address")
 	cmd.Parse()
 
@@ -58,13 +62,20 @@ func main() {
 		logger.FatalWithExitingMessage("The forward address is empty.", nil)
 	}
 
+	if mode == "" {
+		logger.FatalWithExitingMessage("The mode is empty.", nil)
+	}
+	if mode != "dot" && mode != "doq" {
+		logger.FatalWithExitingMessage("Unsupported mode.", nil)
+	}
+
 	if len(listenAddresses) == 0 {
 		logger.FatalWithExitingMessage("No listen addresses.", nil)
 	}
 
 	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
 
-	tcpResolver, err := resolver.New(errGroupCtx, &dns.Client{Net: "tcp-tls"}, forwardAddress)
+	tcpResolver, err := resolver.New(errGroupCtx, mode, forwardAddress, serverName)
 	if err != nil {
 		logger.FatalWithExitingMessage(
 			"An error occurred when creating the TCP resolver.",

@@ -9,4 +9,7 @@ var (
 	// TODO: Move?
 	ErrNilRemoteAddress = errors.New("nil remote address")
 	ErrNilConnectionPool = errors.New("nil connection pool")
+	ErrNilDotConfig = errors.New("nil dot config")
+	ErrEmptyMode = errors.New("empty mode")
+	ErrUnsupportedMode = errors.New("unsupported mode")
 )
