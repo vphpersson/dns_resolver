@@ -5,13 +5,13 @@ go 1.24.0
 toolchain go1.24.2
 
 require (
-	github.com/Motmedel/dns_utils v0.0.43
+	github.com/Motmedel/dns_utils v0.0.44
 	github.com/Motmedel/dns_utils/pkg/log v0.0.9
 	github.com/Motmedel/ecs_go v0.0.62
 	github.com/Motmedel/utils_go v0.0.205
 	github.com/miekg/dns v1.1.66
 	github.com/tdewolff/argp v0.0.0-20250430135133-0f54527d2b1e
-	github.com/vphpersson/connection_pool v0.0.11
+	github.com/vphpersson/connection_pool v0.0.14
 	golang.org/x/sync v0.14.0
 )
 

@@ -1,7 +1,7 @@
 filippo.io/edwards25519 v1.1.0 h1:FNf4tywRC1HmFuKW5xopWpigGjJKiJSV0Cqo0cJWDaA=
 filippo.io/edwards25519 v1.1.0/go.mod h1:BxyFTGdWcka3PhytdK4V28tE5sGfRvvvRV7EaN4VDT4=
-github.com/Motmedel/dns_utils v0.0.43 h1:qtVEhN/aFKOXgJ1bk3PdLFzJf47K11723/0KFalXMME=
-github.com/Motmedel/dns_utils v0.0.43/go.mod h1:E2BVrQXamWhlUuv7nKZrNH2CDbSHaUYUAP5aD33W7YA=
+github.com/Motmedel/dns_utils v0.0.44 h1:MCIN13gSfoYIZm/S6bRzj31cF6Rw8Cm03q93eGH3SYI=
+github.com/Motmedel/dns_utils v0.0.44/go.mod h1:E2BVrQXamWhlUuv7nKZrNH2CDbSHaUYUAP5aD33W7YA=
 github.com/Motmedel/dns_utils/pkg/log v0.0.9 h1:2+yyKapgPu6w21rUJjVe7/mEYSYQXdwu1us+pYg3iRM=
 github.com/Motmedel/dns_utils/pkg/log v0.0.9/go.mod h1:1m6i0SuuEKcIicvSnH6XUbrejo7zhrt4QhnnVvb8upE=
 github.com/Motmedel/ecs_go v0.0.62 h1:zoS2l556+tDVd635T7OfP4JLVyA8mrfReaDOA9FyxvQ=
@@ -28,10 +28,8 @@ github.com/tdewolff/argp v0.0.0-20250430135133-0f54527d2b1e h1:2jfHhbjBKS2wfyvcz
 github.com/tdewolff/argp v0.0.0-20250430135133-0f54527d2b1e/go.mod h1:xw2b1X81m4zY1OGytzHNr/YKXbf/STHkK5idoNamlYE=
 github.com/tdewolff/test v1.0.11 h1:FdLbwQVHxqG16SlkGveC0JVyrJN62COWTRyUFzfbtBE=
 github.com/tdewolff/test v1.0.11/go.mod h1:XPuWBzvdUzhCuxWO1ojpXsyzsA5bFoS3tO/Q3kFuTG8=
-github.com/vphpersson/connection_pool v0.0.10 h1:1+jS9r/YQmEC05pYsF5gAOX9/SigxTWhRM8+7DoMlCY=
-github.com/vphpersson/connection_pool v0.0.10/go.mod h1:/ltHL6JrtuEqIOFZxbQYviGNgpPvE4hH+p3usTyBrx8=
-github.com/vphpersson/connection_pool v0.0.11 h1:mMJH9ToH3f5d+C/gs93ZvamTwT/zab4PQLAEf14coXo=
-github.com/vphpersson/connection_pool v0.0.11/go.mod h1:/ltHL6JrtuEqIOFZxbQYviGNgpPvE4hH+p3usTyBrx8=
+github.com/vphpersson/connection_pool v0.0.14 h1:LB3xkX6I1Tj60pEo8CSe7CkWx4fedL6PE/hqtCfFSIY=
+github.com/vphpersson/connection_pool v0.0.14/go.mod h1:/ltHL6JrtuEqIOFZxbQYviGNgpPvE4hH+p3usTyBrx8=
 golang.org/x/mod v0.24.0 h1:ZfthKaKaT4NrhGVZHO1/WDTwGES4De8KtWO0SIbNJMU=
 golang.org/x/mod v0.24.0/go.mod h1:IXM97Txy2VM4PJ3gI61r1YEk/gAj6zAHN3AdZt6S9Ww=
 golang.org/x/net v0.40.0 h1:79Xs7wF06Gbdcg4kdCCIQArK11Z1hr5POQ6+fIYHNuY=
