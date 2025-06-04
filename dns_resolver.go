@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"dns_resolver/pkg/types/resolver"
+	"errors"
 	"fmt"
 	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
 	"github.com/Motmedel/ecs_go/ecs"
@@ -10,7 +11,8 @@ import (
 	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
 	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
 	"github.com/miekg/dns"
-	"github.com/tdewolff/argp"
+	"github.com/vphpersson/argp/pkg/argp"
+	argpErrors "github.com/vphpersson/argp/pkg/errors"
 	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"os"
@@ -52,7 +54,14 @@ func main() {
 	cmd.AddOpt(&serverName, "s", "server", "Server name")
 	cmd.AddArg(&mode, "mode", "The mode (dot or doq)")
 	cmd.AddRest(&listenAddresses, "listen", "Listen address")
-	cmd.Parse()
+
+	if err := cmd.Parse(); err != nil {
+		if errors.Is(err, argpErrors.ErrShowHelp) {
+			cmd.PrintHelp()
+			os.Exit(0)
+		}
+		logger.FatalWithExitingMessage("An error occurred when parsing the command line arguments.", err)
+	}
 
 	if verbose > 0 {
 		logLevel.Set(slog.LevelDebug)
@@ -92,7 +101,7 @@ func main() {
 		}
 	}()
 
-	go tcpResolver.Cache.StartJanitor(errGroupCtx, 5 * time.Minute)
+	go tcpResolver.Cache.StartJanitor(errGroupCtx, 5*time.Minute)
 
 	// TODO: Add (diagnostic) HTTP server as well?
 
