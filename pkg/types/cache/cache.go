@@ -15,12 +15,11 @@ type Entry struct {
 
 type Cache struct {
 	sync.RWMutex
-	ctx     context.Context
 	entries map[string]*Entry
 }
 
-func New(ctx context.Context) *Cache {
-	return &Cache{ctx: ctx, entries: make(map[string]*Entry)}
+func New() *Cache {
+	return &Cache{entries: make(map[string]*Entry)}
 }
 
 func (c *Cache) Get(key string) (*dns.Msg, bool, time.Duration) {
@@ -69,17 +68,17 @@ func (c *Cache) Set(key string, message *dns.Msg, expirationReference *time.Time
 	return true
 }
 
-func (c *Cache) StartJanitor(every time.Duration) {
+func (c *Cache) StartJanitor(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			select {
-			case <-c.ctx.Done():
+			case <-ctx.Done():
 				return
 			default:
 				now := time.Now()
