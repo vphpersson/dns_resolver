@@ -12,8 +12,11 @@ import (
 	dnsUtilsErrors "github.com/Motmedel/dns_utils/pkg/errors"
 	dnsUtilsQuic "github.com/Motmedel/dns_utils/pkg/quic"
 	dnsUtilsTypes "github.com/Motmedel/dns_utils/pkg/types"
+	"github.com/Motmedel/ecs_go/ecs"
 	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	motmedelJson "github.com/Motmedel/utils_go/pkg/json"
+	"github.com/Motmedel/utils_go/pkg/log"
 	motmedelTlsContext "github.com/Motmedel/utils_go/pkg/tls/context"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
@@ -22,8 +25,50 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"time"
 )
+
+type Blocklist interface {
+	IsBlocked(qname string) bool
+	GetRule() *ecs.Rule
+}
+
+func makeBlockedResponse(request *dns.Msg) *dns.Msg {
+	if request == nil {
+		return nil
+	}
+
+	requestQuestions := request.Question
+	if len(requestQuestions) == 0 {
+		return nil
+	}
+
+	question := requestQuestions[0]
+
+	response := new(dns.Msg)
+	response.SetRcode(request, dns.RcodeNameError)
+
+	response.Ns = []dns.RR{
+		&dns.SOA{
+			Hdr: dns.RR_Header{
+				Name:   question.Name,
+				Rrtype: dns.TypeSOA,
+				Class:  dns.ClassINET,
+				Ttl:    3600,
+			},
+			Ns:      "ns.block.local.",
+			Mbox:    "hostmaster.block.local.",
+			Serial:  uint32(time.Now().Unix()),
+			Refresh: 3600,
+			Retry:   600,
+			Expire:  86400,
+			Minttl:  3600,
+		},
+	}
+
+	return response
+}
 
 func getCacheKey(q dns.Question) string {
 	return fmt.Sprintf("%s:%d:%d", strings.ToLower(q.Name), q.Qtype, q.Qclass)
@@ -41,6 +86,7 @@ type Resolver struct {
 	Cache         *cache.Cache
 	Mode          string
 	DotConfig     *DotConfig
+	Blocklists    []Blocklist
 }
 
 func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, error) {
@@ -156,48 +202,111 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		)
 		return
 	}
+	remateAddrString := remoteAddr.String()
+	transportProtocol := remoteAddr.Network()
+
+	var dnsResolverServerAddress string
+	if localAddr := responseWriter.LocalAddr(); localAddr != nil {
+		dnsResolverServerAddress = localAddr.String()
+	}
 
 	// Obtain a response.
 
-	var response *dns.Msg
-	cacheKey := getCacheKey(requestQuestions[0])
+	question := requestQuestions[0]
 
+	var response *dns.Msg
+	cacheKey := getCacheKey(question)
 	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
 	if !cacheHit || response == nil {
-		var dnsContext dnsUtilsTypes.DnsContext
-		ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext))
+		var blockedByAnyList bool
+		blocklists := r.Blocklists
+		if len(blocklists) > 0 {
+			var waitGroup sync.WaitGroup
 
-		var err error
-		switch r.Mode {
-		case "dot":
-			response, err = r.handleDot(ctxWithTlsDns, request)
-		case "doq":
-			response, err = r.handleDoq(ctxWithTlsDns, request)
-		default:
-			slog.ErrorContext(
-				motmedelContext.WithErrorContextValue(
-					ctxWithTlsDns,
-					motmedelErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, r.Mode)),
-				),
-				"Unsupported mode.",
-			)
-			return
+			for _, blocklist := range blocklists {
+				waitGroup.Go(
+					func() {
+						if block := blocklist.IsBlocked(question.Name); block {
+							blockedByAnyList = true
+
+							t := time.Now()
+							ctxWithDns := dnsUtilsContext.WithDnsContextValue(
+								r.ParentContext,
+								&dnsUtilsTypes.DnsContext{
+									Time:            &t,
+									ClientAddress:   remateAddrString,
+									ServerAddress:   dnsResolverServerAddress,
+									Transport:       transportProtocol,
+									QuestionMessage: request,
+								},
+							)
+
+							var args []any
+
+							if rule := blocklist.GetRule(); rule != nil {
+								ruleMap, err := motmedelJson.ObjectToMap(rule)
+								if err != nil {
+									slog.ErrorContext(
+										motmedelContext.WithErrorContextValue(ctxWithDns, err),
+										"An error occurred when converting a rule to a map.",
+									)
+								} else {
+									args = log.AttrsFromMap(ruleMap)
+								}
+							}
+
+							slog.With(
+								slog.Group("rule", args...),
+							).WarnContext(
+								ctxWithDns,
+								"A DNS request was blocked by a blocklist.",
+							)
+						}
+					},
+				)
+			}
+
+			waitGroup.Wait()
 		}
 
-		if err != nil {
-			slog.ErrorContext(
-				motmedelContext.WithErrorContextValue(
-					ctxWithTlsDns,
-					motmedelErrors.New(fmt.Errorf("handle: %w", err), request),
-				),
-				"An error occurred when handling a request.",
-			)
-			return
-		}
+		if blockedByAnyList {
+			response = makeBlockedResponse(request)
+		} else {
+			var dnsContext dnsUtilsTypes.DnsContext
+			ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext))
 
-		if response != nil {
-			slog.InfoContext(ctxWithTlsDns, "A DNS request was forwarded.")
-			r.Cache.Set(cacheKey, response, dnsContext.Time)
+			var err error
+			switch r.Mode {
+			case "dot":
+				response, err = r.handleDot(ctxWithTlsDns, request)
+			case "doq":
+				response, err = r.handleDoq(ctxWithTlsDns, request)
+			default:
+				slog.ErrorContext(
+					motmedelContext.WithErrorContextValue(
+						ctxWithTlsDns,
+						motmedelErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, r.Mode)),
+					),
+					"Unsupported mode.",
+				)
+				return
+			}
+
+			if err != nil {
+				slog.ErrorContext(
+					motmedelContext.WithErrorContextValue(
+						ctxWithTlsDns,
+						motmedelErrors.New(fmt.Errorf("handle: %w", err), request),
+					),
+					"An error occurred when handling a request.",
+				)
+				return
+			}
+
+			if response != nil {
+				slog.InfoContext(ctxWithTlsDns, "A DNS request was forwarded.")
+				r.Cache.Set(cacheKey, response, dnsContext.Time)
+			}
 		}
 	}
 
@@ -221,8 +330,6 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		dns_utils.ApplyRemainingTtl(response, uint32(max(int64(0), min(int64(remainingTtl.Seconds()), int64(math.MaxUint32)))))
 	}
 
-	transportProtocol := remoteAddr.Network()
-
 	if transportProtocol == "udp" {
 		bufferSize := uint16(512)
 		if opt := request.IsEdns0(); opt != nil {
@@ -233,11 +340,6 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	}
 
 	// Write the response.
-
-	var dnsResolverServerAddress string
-	if localAddr := responseWriter.LocalAddr(); localAddr != nil {
-		dnsResolverServerAddress = localAddr.String()
-	}
 
 	now := time.Now()
 	ctxWithDns := dnsUtilsContext.WithDnsContextValue(
