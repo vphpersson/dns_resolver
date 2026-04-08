@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+type Key struct {
+	Name   string
+	Qtype  uint16
+	Qclass uint16
+}
+
 type Entry struct {
 	Msg        *dns.Msg
 	Expiration time.Time
@@ -15,14 +21,14 @@ type Entry struct {
 
 type Cache struct {
 	sync.RWMutex
-	entries map[string]*Entry
+	entries map[Key]*Entry
 }
 
 func New() *Cache {
-	return &Cache{entries: make(map[string]*Entry)}
+	return &Cache{entries: make(map[Key]*Entry)}
 }
 
-func (c *Cache) Get(key string) (*dns.Msg, bool, time.Duration) {
+func (c *Cache) Get(key Key) (*dns.Msg, bool, time.Duration) {
 	c.RLock()
 	entry, ok := c.entries[key]
 	c.RUnlock()
@@ -33,8 +39,12 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, time.Duration) {
 	remainingTtl := time.Until(entry.Expiration)
 	if remainingTtl <= 0 {
 		c.Lock()
-		defer c.Unlock()
-		delete(c.entries, key)
+		// Only delete if the entry in the map is still the expired one we
+		// observed; otherwise a concurrent Set may have replaced it.
+		if cur := c.entries[key]; cur == entry {
+			delete(c.entries, key)
+		}
+		c.Unlock()
 
 		return nil, false, 0
 	}
@@ -42,7 +52,7 @@ func (c *Cache) Get(key string) (*dns.Msg, bool, time.Duration) {
 	return entry.Msg, true, remainingTtl
 }
 
-func (c *Cache) Set(key string, message *dns.Msg, expirationReference *time.Time) bool {
+func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) bool {
 	if message == nil {
 		return false
 	}
@@ -68,6 +78,36 @@ func (c *Cache) Set(key string, message *dns.Msg, expirationReference *time.Time
 	return true
 }
 
+// sweep removes expired entries. The scan phase uses an RLock so concurrent
+// readers are not blocked; the delete phase takes a write lock only if any
+// expired keys were found.
+func (c *Cache) sweep() {
+	now := time.Now()
+
+	var expired []Key
+	c.RLock()
+	for k, e := range c.entries {
+		if now.After(e.Expiration) {
+			expired = append(expired, k)
+		}
+	}
+	c.RUnlock()
+
+	if len(expired) == 0 {
+		return
+	}
+
+	c.Lock()
+	for _, k := range expired {
+		// Re-check under the write lock: a concurrent Set may have replaced
+		// the entry with a fresh one between the two phases.
+		if e, ok := c.entries[k]; ok && now.After(e.Expiration) {
+			delete(c.entries, k)
+		}
+	}
+	c.Unlock()
+}
+
 func (c *Cache) StartJanitor(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -81,14 +121,7 @@ func (c *Cache) StartJanitor(ctx context.Context, every time.Duration) {
 			case <-ctx.Done():
 				return
 			default:
-				now := time.Now()
-				c.Lock()
-				for k, e := range c.entries {
-					if now.After(e.Expiration) {
-						delete(c.entries, k)
-					}
-				}
-				c.Unlock()
+				c.sweep()
 			}
 		}
 	}

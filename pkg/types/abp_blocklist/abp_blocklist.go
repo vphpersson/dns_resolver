@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/schema"
 	"github.com/Motmedel/utils_go/pkg/utils"
 	"golang.org/x/net/idna"
 	"io"
@@ -14,8 +14,23 @@ import (
 
 var ErrNilList = errors.New("nil list")
 
+func isAscii(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeQname(q string) string {
 	q = strings.TrimSuffix(strings.ToLower(q), ".")
+	// Fast path: for pure-ASCII names (the common case) we can skip the IDNA
+	// ToASCII call entirely — it only does work when non-ASCII code points
+	// are present.
+	if isAscii(q) {
+		return q
+	}
 	if a, ok := toAscii(q); ok {
 		return a
 	}
@@ -50,7 +65,7 @@ func extractHost(s string) string {
 }
 
 type List struct {
-	Rule *ecs.Rule
+	Rule  *schema.Rule
 	Block map[string]struct{}
 	Allow map[string]struct{}
 }
@@ -83,7 +98,7 @@ func (l *List) IsBlocked(qname string) bool {
 	return false
 }
 
-func (l *List) GetRule() *ecs.Rule {
+func (l *List) GetRule() *schema.Rule {
 	return l.Rule
 }
 

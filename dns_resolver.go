@@ -6,39 +6,62 @@ import (
 	"dns_resolver/pkg/types/abp_blocklist"
 	"dns_resolver/pkg/types/resolver"
 	"fmt"
-	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
-	"github.com/Motmedel/ecs_go/ecs"
-	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/Motmedel/utils_go/pkg/http/errors"
-	motmedelHttpUtils "github.com/Motmedel/utils_go/pkg/http/utils"
-	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
-	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
-	"github.com/miekg/dns"
-	"github.com/vphpersson/argument_parser/pkg/argument_parser"
-	"github.com/vphpersson/argument_parser/pkg/types/option"
-	"golang.org/x/sync/errgroup"
 	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
+
+	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
+	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
+	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/http/errors"
+	"github.com/Motmedel/utils_go/pkg/http/types/fetch_config"
+	motmedelHttpUtils "github.com/Motmedel/utils_go/pkg/http/utils"
+	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
+	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
+	"github.com/Motmedel/utils_go/pkg/schema"
+	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
+	"github.com/miekg/dns"
+	"github.com/vphpersson/argument_parser/pkg/argument_parser"
+	"github.com/vphpersson/argument_parser/pkg/types/option"
+	"golang.org/x/sync/errgroup"
 )
 
-func getOisdBigList() (*abp_blocklist.List, error) {
+// getOisdBigList fetches the OISD big blocklist. If etag or lastModified are
+// non-empty, a conditional request is made; on a 304 Not Modified response
+// this returns (nil, nil) to signal the caller that the current list is still
+// up to date.
+func getOisdBigList(etag string, lastModified string) (*abp_blocklist.List, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-None-Match"] = `"` + etag + `"`
+	}
+	if lastModified != "" {
+		headers["If-Modified-Since"] = lastModified
+	}
+
 	response, body, err := motmedelHttpUtils.Fetch(
 		context.Background(),
 		"https://big.oisd.nl",
-		&http.Client{Timeout: 10 * time.Second},
-		nil,
+		fetch_config.WithHttpClient(&http.Client{Timeout: 10 * time.Second}),
+		fetch_config.WithHeaders(headers),
+		fetch_config.WithSkipErrorOnStatus(true),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("fetch: %w", err)
 	}
+	if response == nil {
+		return nil, motmedelErrors.NewWithTrace(errors.ErrNilHttpResponse)
+	}
 
-	responseHeader := response.Header
-	if responseHeader == nil {
-		return nil, motmedelErrors.NewWithTrace(errors.ErrNilHttpResponseHeader)
+	if response.StatusCode == http.StatusNotModified {
+		return nil, nil
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, motmedelErrors.NewWithTrace(
+			fmt.Errorf("unexpected status code: %d", response.StatusCode),
+		)
 	}
 
 	list, err := abp_blocklist.FromReader(bytes.NewReader(body))
@@ -49,16 +72,16 @@ func getOisdBigList() (*abp_blocklist.List, error) {
 		return nil, motmedelErrors.NewWithTrace(abp_blocklist.ErrNilList)
 	}
 
-	etag := responseHeader.Get("ETag")
-	unquotedEtag, err := strconv.Unquote(etag)
+	newEtag := response.Header.Get("ETag")
+	unquotedEtag, err := strconv.Unquote(newEtag)
 	if err != nil {
-		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("strconv unquote: %w", err), etag)
+		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("strconv unquote: %w", err), newEtag)
 	}
 
-	list.Rule = &ecs.Rule{
-		Id: unquotedEtag,
-		Name: "oisd big",
-		Version: responseHeader.Get("Last-Modified"),
+	list.Rule = &schema.Rule{
+		Id:      unquotedEtag,
+		Name:    "oisd big",
+		Version: response.Header.Get("Last-Modified"),
 	}
 
 	return list, nil
@@ -75,7 +98,7 @@ func main() {
 					&slog.HandlerOptions{
 						AddSource:   false,
 						Level:       &logLevel,
-						ReplaceAttr: ecs.TimestampReplaceAttr,
+						ReplaceAttr: schemaUtils.TimestampReplaceAttr,
 					},
 				),
 				Extractors: []motmedelLog.ContextExtractor{
@@ -97,7 +120,7 @@ func main() {
 	var mode string
 	var listenAddresses []string
 
-	argumentParser := argument_parser.ArgumentParser{
+	argumentParser := argument_parser.Parser{
 		Options: []option.Option{
 			option.NewStringOption('f', "forward", "forward address", true, &forwardAddress),
 			option.NewBoolOption('v', "verbose", "whether verbose", false, &verbose),
@@ -133,12 +156,15 @@ func main() {
 		logger.FatalWithExitingMessage("No listen addresses.", nil)
 	}
 
-	oisdBigList, err := getOisdBigList()
+	oisdBigList, err := getOisdBigList("", "")
 	if err != nil {
 		logger.FatalWithExitingMessage(
 			"An error occurred when getting the oisd big list.",
 			fmt.Errorf("get oisd big list: %w", err),
 		)
+	}
+	if oisdBigList == nil {
+		logger.FatalWithExitingMessage("The initial oisd big list is empty.", nil)
 	}
 
 	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
@@ -160,7 +186,7 @@ func main() {
 		}
 	}()
 
-	dnsResolver.Blocklists = []resolver.Blocklist{oisdBigList}
+	dnsResolver.SetBlocklists([]resolver.Blocklist{oisdBigList})
 
 	go dnsResolver.Cache.StartJanitor(errGroupCtx, 5*time.Minute)
 
@@ -168,6 +194,7 @@ func main() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 
+		currentList := oisdBigList
 		for {
 			select {
 			case <-errGroupCtx.Done():
@@ -177,18 +204,30 @@ func main() {
 				case <-errGroupCtx.Done():
 					return
 				default:
-					refreshList, err := getOisdBigList()
+					var etag, lastModified string
+					if rule := currentList.Rule; rule != nil {
+						etag = rule.Id
+						lastModified = rule.Version
+					}
+
+					refreshList, err := getOisdBigList(etag, lastModified)
 					if err != nil {
 						slog.ErrorContext(
-							motmedelContext.WithErrorContextValue(
+							motmedelContext.WithError(
 								errGroupCtx,
 								fmt.Errorf("get oisd big list: %w", err),
 							),
 							"An error occurred when getting the oisd big list.",
 						)
+						continue
+					}
+					if refreshList == nil {
+						// 304 Not Modified — keep current list.
+						continue
 					}
 
-					dnsResolver.Blocklists = []resolver.Blocklist{refreshList}
+					currentList = refreshList
+					dnsResolver.SetBlocklists([]resolver.Blocklist{refreshList})
 				}
 			}
 		}
