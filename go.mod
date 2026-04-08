@@ -3,13 +3,13 @@ module dns_resolver
 go 1.26
 
 require (
-	github.com/Motmedel/dns_utils v0.0.51
+	github.com/Motmedel/dns_utils v0.0.53
 	github.com/Motmedel/dns_utils/pkg/quic v0.0.3
-	github.com/Motmedel/utils_go v0.0.457
+	github.com/Motmedel/utils_go v0.0.458
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.59.0
 	github.com/vphpersson/argument_parser v0.0.4
-	github.com/vphpersson/connection_pool v0.0.14
+	github.com/vphpersson/connection_pool v0.0.15
 	golang.org/x/net v0.52.0
 	golang.org/x/sync v0.20.0
 )

@@ -20,6 +20,8 @@ import (
 	dnsUtilsTypes "github.com/Motmedel/dns_utils/pkg/types"
 	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/empty_error"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
 	motmedelJson "github.com/Motmedel/utils_go/pkg/json"
 	"github.com/Motmedel/utils_go/pkg/log"
 	"github.com/Motmedel/utils_go/pkg/schema"
@@ -27,8 +29,21 @@ import (
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/vphpersson/connection_pool/pkg/connection_pool"
-	connectionPoolErrors "github.com/vphpersson/connection_pool/pkg/errors"
 )
+
+// makeEventGroup builds an ECS `event` attribute group with the common
+// `kind=event` and `category=[network]` defaults used throughout the resolver.
+func makeEventGroup(action, reason, outcome string, eventTypes ...string) slog.Attr {
+	return slog.Group(
+		"event",
+		slog.String("action", action),
+		slog.String("reason", reason),
+		slog.String("kind", "event"),
+		slog.String("outcome", outcome),
+		slog.Any("category", []string{"network"}),
+		slog.Any("type", eventTypes),
+	)
+}
 
 type Blocklist interface {
 	IsBlocked(qname string) bool
@@ -90,7 +105,7 @@ func writeErrorResponse(responseWriter dns.ResponseWriter, request *dns.Msg, rco
 
 type DotConfig struct {
 	Client         *dns.Client
-	ConnectionPool *connection_pool.ConnectionPool[*dns.Conn]
+	ConnectionPool *connection_pool.Pool[*dns.Conn]
 }
 
 type Resolver struct {
@@ -117,17 +132,17 @@ func (r *Resolver) Blocklists() []Blocklist {
 func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, error) {
 	dotConfig := r.DotConfig
 	if dotConfig == nil {
-		return nil, motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNilDotConfig)
+		return nil, motmedelErrors.NewWithTrace(nil_error.New("dot config"))
 	}
 
 	client := dotConfig.Client
 	if client == nil {
-		return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrNilDnsClient)
+		return nil, motmedelErrors.NewWithTrace(nil_error.New("dns client"))
 	}
 
 	connectionPool := dotConfig.ConnectionPool
 	if connectionPool == nil {
-		return nil, motmedelErrors.NewWithTrace(connectionPoolErrors.ErrNilConnectionPool)
+		return nil, motmedelErrors.NewWithTrace(nil_error.New("connection pool"))
 	}
 
 	var response *dns.Msg
@@ -137,7 +152,7 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 			var err error
 			var connection *dns.Conn
 
-			connection, err = connectionPool.Get()
+			connection, err = connectionPool.Get(ctx)
 			if err != nil {
 				return false, motmedelErrors.New(fmt.Errorf("connection pool get: %w", err), connectionPool)
 			}
@@ -153,7 +168,13 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 			if !motmedelErrors.IsClosedError(err) {
 				slog.WarnContext(
 					motmedelContext.WithError(ctx, err),
-					"An error occurred when exchanging with the DNS server.",
+					"",
+					makeEventGroup(
+						"dns_exchange",
+						"An error occurred when exchanging with the DNS server.",
+						"failure",
+						"connection", "protocol", "error",
+					),
 				)
 			}
 
@@ -172,7 +193,7 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 
 func (r *Resolver) handleDoq(ctx context.Context, request *dns.Msg) (*dns.Msg, error) {
 	if request == nil {
-		return nil, fmt.Errorf("%w (request)", dnsUtilsErrors.ErrNilMessage)
+		return nil, nil_error.New("request")
 	}
 
 	response, err := dnsUtilsQuic.Exchange(
@@ -198,9 +219,15 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		slog.WarnContext(
 			motmedelContext.WithError(
 				r.ParentContext,
-				motmedelErrors.NewWithTrace(fmt.Errorf("%w (request)", dnsUtilsErrors.ErrNilMessage)),
+				motmedelErrors.NewWithTrace(nil_error.New("request")),
 			),
-			"Empty request.",
+			"",
+			makeEventGroup(
+				"dns_request_validate",
+				"Empty request.",
+				"failure",
+				"protocol", "error",
+			),
 		)
 		return
 	}
@@ -212,7 +239,13 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				r.ParentContext,
 				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNoQuestions),
 			),
-			"No request questions.",
+			"",
+			makeEventGroup(
+				"dns_request_validate",
+				"No request questions.",
+				"failure",
+				"protocol", "error",
+			),
 		)
 		return
 	}
@@ -222,9 +255,15 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		slog.WarnContext(
 			motmedelContext.WithError(
 				r.ParentContext,
-				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNilRemoteAddress),
+				motmedelErrors.NewWithTrace(nil_error.New("remote address")),
 			),
-			"Empty remote address.",
+			"",
+			makeEventGroup(
+				"dns_request_validate",
+				"Empty remote address.",
+				"failure",
+				"error",
+			),
 		)
 		return
 	}
@@ -251,11 +290,10 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 			}
 			blockedByAnyList = true
 
-			t := time.Now()
 			ctxWithDns := dnsUtilsContext.WithDnsContextValue(
 				r.ParentContext,
 				&dnsUtilsTypes.DnsContext{
-					Time:            &t,
+					Time:            new(time.Now()),
 					ClientAddress:   remoteAddrString,
 					ServerAddress:   dnsResolverServerAddress,
 					Transport:       transportProtocol,
@@ -270,7 +308,13 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				if err != nil {
 					slog.ErrorContext(
 						motmedelContext.WithError(ctxWithDns, err),
-						"An error occurred when converting a rule to a map.",
+						"",
+						makeEventGroup(
+							"rule_serialize",
+							"An error occurred when converting a rule to a map.",
+							"failure",
+							"error",
+						),
 					)
 				} else {
 					args = log.AttrsFromMap(ruleMap)
@@ -281,7 +325,13 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				slog.Group("rule", args...),
 			).WarnContext(
 				ctxWithDns,
-				"A DNS request was blocked by a blocklist.",
+				"",
+				makeEventGroup(
+					"dns_request_block",
+					"A DNS request was blocked by a blocklist.",
+					"success",
+					"connection", "protocol", "denied",
+				),
 			)
 			break
 		}
@@ -304,7 +354,13 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						ctxWithTlsDns,
 						motmedelErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, r.Mode)),
 					),
-					"Unsupported mode.",
+					"",
+					makeEventGroup(
+						"dns_request_forward",
+						"Unsupported mode.",
+						"failure",
+						"error",
+					),
 				)
 				writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
 				return
@@ -316,14 +372,29 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						ctxWithTlsDns,
 						motmedelErrors.New(fmt.Errorf("handle: %w", err), request),
 					),
-					"An error occurred when handling a request.",
+					"",
+					makeEventGroup(
+						"dns_request_forward",
+						"An error occurred when handling a request.",
+						"failure",
+						"connection", "protocol", "error",
+					),
 				)
 				writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
 				return
 			}
 
 			if response != nil {
-				slog.InfoContext(ctxWithTlsDns, "A DNS request was forwarded.")
+				slog.InfoContext(
+					ctxWithTlsDns,
+					"",
+					makeEventGroup(
+						"dns_request_forward",
+						"A DNS request was forwarded.",
+						"success",
+						"connection", "protocol", "info",
+					),
+				)
 				r.Cache.Set(cacheKey, response, dnsContext.Time)
 			}
 		}
@@ -333,9 +404,15 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		slog.ErrorContext(
 			motmedelContext.WithError(
 				r.ParentContext,
-				motmedelErrors.NewWithTrace(fmt.Errorf("%w (response)", dnsUtilsErrors.ErrNilMessage)),
+				motmedelErrors.NewWithTrace(nil_error.New("response")),
 			),
-			"Empty response.",
+			"",
+			makeEventGroup(
+				"dns_response_validate",
+				"Empty response.",
+				"failure",
+				"protocol", "error",
+			),
 		)
 		writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
 		return
@@ -361,11 +438,10 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	// Write the response.
 
-	now := time.Now()
 	ctxWithDns := dnsUtilsContext.WithDnsContextValue(
 		r.ParentContext,
 		&dnsUtilsTypes.DnsContext{
-			Time:            &now,
+			Time:            new(time.Now()),
 			ClientAddress:   remoteAddr.String(),
 			ServerAddress:   dnsResolverServerAddress,
 			Transport:       transportProtocol,
@@ -380,13 +456,28 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				ctxWithDns,
 				motmedelErrors.New(fmt.Errorf("response writer write msg: %w", err), response),
 			),
-			"An error occurred when writing a response.",
+			"",
+			makeEventGroup(
+				"dns_response_write",
+				"An error occurred when writing a response.",
+				"failure",
+				"connection", "error",
+			),
 		)
 
 		return
 	}
 
-	slog.InfoContext(ctxWithDns, "A request was handled.")
+	slog.InfoContext(
+		ctxWithDns,
+		"",
+		makeEventGroup(
+			"dns_request_handle",
+			"A request was handled.",
+			"success",
+			"connection", "protocol", "info",
+		),
+	)
 }
 
 func (r *Resolver) Close() error {
@@ -409,11 +500,11 @@ func (r *Resolver) Close() error {
 
 func New(ctx context.Context, mode string, serverAddress string, serverName string) (*Resolver, error) {
 	if mode == "" {
-		return nil, motmedelErrors.NewWithTrace(dnsResolverErrors.ErrEmptyMode)
+		return nil, motmedelErrors.NewWithTrace(empty_error.New("mode"))
 	}
 
 	if serverAddress == "" {
-		return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrEmptyDnsServer)
+		return nil, motmedelErrors.NewWithTrace(empty_error.New("dns server"))
 	}
 
 	resolver := Resolver{
@@ -435,12 +526,12 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 			ConnectionPool: connection_pool.New[*dns.Conn](
 				func() (*dns.Conn, error) {
 					if client == nil {
-						return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrNilDnsClient)
+						return nil, motmedelErrors.NewWithTrace(nil_error.New("dns client"))
 					}
 
 					resolverServerAddress := resolver.ServerAddress
 					if resolverServerAddress == "" {
-						return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrEmptyDnsServer)
+						return nil, motmedelErrors.NewWithTrace(empty_error.New("dns server"))
 					}
 
 					connection, err := client.Dial(resolverServerAddress)
@@ -452,7 +543,7 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 						)
 					}
 					if connection == nil {
-						return nil, motmedelErrors.NewWithTrace(dnsUtilsErrors.ErrNilConnection)
+						return nil, motmedelErrors.NewWithTrace(nil_error.New("connection"))
 					}
 
 					return connection, nil

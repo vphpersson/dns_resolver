@@ -1,12 +1,6 @@
 *
-!/.dockerignore
-!/.gitignore
 !/dns_resolver.go
-!/Dockerfile
 !/go.mod
 !/go.sum
-!/Makefile
-
 !/pkg
-
 !/pkg/**/*

@@ -15,11 +15,13 @@ import (
 	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
 	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
 	"github.com/Motmedel/utils_go/pkg/http/errors"
 	"github.com/Motmedel/utils_go/pkg/http/types/fetch_config"
 	motmedelHttpUtils "github.com/Motmedel/utils_go/pkg/http/utils"
 	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
 	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
+	motmedelLogHandler "github.com/Motmedel/utils_go/pkg/log/handler"
 	"github.com/Motmedel/utils_go/pkg/schema"
 	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
 	"github.com/miekg/dns"
@@ -69,7 +71,7 @@ func getOisdBigList(etag string, lastModified string) (*abp_blocklist.List, erro
 		return nil, fmt.Errorf("abp blocklist from reader: %w", err)
 	}
 	if list == nil {
-		return nil, motmedelErrors.NewWithTrace(abp_blocklist.ErrNilList)
+		return nil, motmedelErrors.NewWithTrace(nil_error.New("list"))
 	}
 
 	newEtag := response.Header.Get("ETag")
@@ -90,16 +92,31 @@ func getOisdBigList(etag string, lastModified string) (*abp_blocklist.List, erro
 func main() {
 	var logLevel slog.LevelVar
 
+	replaceAttr := func(groups []string, attr slog.Attr) slog.Attr {
+		attr = schemaUtils.TimestampReplaceAttr(groups, attr)
+		// Drop the top-level `message` attribute when it is empty so that log
+		// sites that intentionally leave it to be populated later (e.g. by
+		// the DNS context extractor) do not emit a dangling empty field.
+		if len(groups) == 0 && attr.Key == "message" {
+			if value, ok := attr.Value.Any().(string); ok && value == "" {
+				return slog.Attr{}
+			}
+		}
+		return attr
+	}
+
 	logger := &motmedelErrorLogger.Logger{
 		Logger: slog.New(
 			&motmedelLog.ContextHandler{
-				Next: slog.NewJSONHandler(
-					os.Stdout,
-					&slog.HandlerOptions{
-						AddSource:   false,
-						Level:       &logLevel,
-						ReplaceAttr: schemaUtils.TimestampReplaceAttr,
-					},
+				Next: motmedelLogHandler.New(
+					slog.NewJSONHandler(
+						os.Stdout,
+						&slog.HandlerOptions{
+							AddSource:   false,
+							Level:       &logLevel,
+							ReplaceAttr: replaceAttr,
+						},
+					),
 				),
 				Extractors: []motmedelLog.ContextExtractor{
 					&motmedelLog.ErrorContextExtractor{
@@ -217,12 +234,21 @@ func main() {
 								errGroupCtx,
 								fmt.Errorf("get oisd big list: %w", err),
 							),
-							"An error occurred when getting the oisd big list.",
+							"",
+							slog.Group(
+								"event",
+								slog.String("action", "blocklist_refresh"),
+								slog.String("reason", "An error occurred when getting the oisd big list."),
+								slog.String("kind", "event"),
+								slog.String("outcome", "failure"),
+								slog.Any("category", []string{"network"}),
+								slog.Any("type", []string{"error"}),
+							),
 						)
 						continue
 					}
 					if refreshList == nil {
-						// 304 Not Modified — keep current list.
+						// 304 Not Modified — keep the current list.
 						continue
 					}
 

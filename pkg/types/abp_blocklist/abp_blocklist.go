@@ -2,17 +2,15 @@ package abp_blocklist
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
+	"io"
+	"strings"
+
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
 	"github.com/Motmedel/utils_go/pkg/schema"
 	"github.com/Motmedel/utils_go/pkg/utils"
 	"golang.org/x/net/idna"
-	"io"
-	"strings"
 )
-
-var ErrNilList = errors.New("nil list")
 
 func isAscii(s string) bool {
 	for i := 0; i < len(s); i++ {

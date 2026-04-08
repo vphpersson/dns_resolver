@@ -1,9 +1,9 @@
-github.com/Motmedel/dns_utils v0.0.51 h1:86mOCM2ukGNi7xfqqDrALoHtA6QYZX7RHe5hdVi9lxM=
-github.com/Motmedel/dns_utils v0.0.51/go.mod h1:RChZ5DEF9JwqK5rqynfHbBFbvY7Nn77fMIrcAGPuyM4=
+github.com/Motmedel/dns_utils v0.0.53 h1:QoPrCNK1ZjBHEQLW96zcmoXrtydvIXX/V79FQ7DaHKg=
+github.com/Motmedel/dns_utils v0.0.53/go.mod h1:RChZ5DEF9JwqK5rqynfHbBFbvY7Nn77fMIrcAGPuyM4=
 github.com/Motmedel/dns_utils/pkg/quic v0.0.3 h1:mpTeJ4J6NZFC7Ljq50UypCUGgqPZgiQlxl/FnXijgvY=
 github.com/Motmedel/dns_utils/pkg/quic v0.0.3/go.mod h1:1J3olxa3S1Gr0ANaL2JRul4g/rWUL435eSv8K8l7VMo=
-github.com/Motmedel/utils_go v0.0.457 h1:bJ9A7t3wePvZQo8BRliCQf0A1jqnZ+RH38141sLqixs=
-github.com/Motmedel/utils_go v0.0.457/go.mod h1:st9wrD7tyw4AM64tOD7rs0vO7tMxmXQC1Apm48B+4Q4=
+github.com/Motmedel/utils_go v0.0.458 h1:PigELUTUKXE1//57mocmUGE96gT9NALnMI4ZRGTWH+s=
+github.com/Motmedel/utils_go v0.0.458/go.mod h1:st9wrD7tyw4AM64tOD7rs0vO7tMxmXQC1Apm48B+4Q4=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
@@ -18,8 +18,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/vphpersson/argument_parser v0.0.4 h1:g/q/147M+3A7crOvXX+MmqY9t32A+igJ82XKmPCpUZA=
 github.com/vphpersson/argument_parser v0.0.4/go.mod h1:uEeMGcCEzMM7gqWOY8l40onpsGlTIDsaNEm5CAklitE=
-github.com/vphpersson/connection_pool v0.0.14 h1:LB3xkX6I1Tj60pEo8CSe7CkWx4fedL6PE/hqtCfFSIY=
-github.com/vphpersson/connection_pool v0.0.14/go.mod h1:/ltHL6JrtuEqIOFZxbQYviGNgpPvE4hH+p3usTyBrx8=
+github.com/vphpersson/connection_pool v0.0.15 h1:PJR6p0fi3pH/CBoFuWehcfc+C7XM70Rhosb2QM2EeoE=
+github.com/vphpersson/connection_pool v0.0.15/go.mod h1:tPBqpf8fIbR+dlYsb8RaCK4Yk3eFIkiapIUSM4va22U=
 go.uber.org/mock v0.5.2 h1:LbtPTcP8A5k9WPXj54PPPbjcI4Y6lhyOZXn+VS7wNko=
 go.uber.org/mock v0.5.2/go.mod h1:wLlUxC2vVTPTaE3UD51E0BGOAElKrILxhVSDYQLld5o=
 golang.org/x/crypto v0.49.0 h1:+Ng2ULVvLHnJ/ZFEq4KdcDd/cfjrrjjNSXNzxg0Y4U4=
