@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -115,6 +117,27 @@ type DotConfig struct {
 	ConnectionPool *connection_pool.Pool[*dns.Conn]
 }
 
+// blocklistSet is the value stored behind Resolver.blocklists. It owns both
+// the name-keyed map (used for upsert and removal) and a pre-sorted slice
+// (used by the read path so that ServeDNS does not allocate per query).
+type blocklistSet struct {
+	byName map[string]Blocklist
+	list   []Blocklist
+}
+
+func newBlocklistSet(byName map[string]Blocklist) *blocklistSet {
+	names := make([]string, 0, len(byName))
+	for k := range byName {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	list := make([]Blocklist, 0, len(byName))
+	for _, k := range names {
+		list = append(list, byName[k])
+	}
+	return &blocklistSet{byName: byName, list: list}
+}
+
 type Resolver struct {
 	ParentContext context.Context
 	ServerAddress string
@@ -123,18 +146,68 @@ type Resolver struct {
 	Mode          string
 	DotConfig     *DotConfig
 	Hosts         HostsResolver
-	blocklists    atomic.Pointer[[]Blocklist]
+	blocklistsMu  sync.Mutex
+	blocklists    atomic.Pointer[blocklistSet]
 }
 
-func (r *Resolver) SetBlocklists(blocklists []Blocklist) {
-	r.blocklists.Store(&blocklists)
+// SetBlocklist installs (or replaces) a named blocklist. The read path is
+// lock-free; only writers contend on blocklistsMu, and writes are expected
+// to be rare (initial load + reloads on file change).
+func (r *Resolver) SetBlocklist(name string, blocklist Blocklist) {
+	if name == "" || blocklist == nil {
+		return
+	}
+
+	r.blocklistsMu.Lock()
+	defer r.blocklistsMu.Unlock()
+
+	cur := r.blocklists.Load()
+	next := make(map[string]Blocklist, len(cur.byNameOrEmpty())+1)
+	for k, v := range cur.byNameOrEmpty() {
+		next[k] = v
+	}
+	next[name] = blocklist
+	r.blocklists.Store(newBlocklistSet(next))
 }
 
+// RemoveBlocklist drops a named blocklist if present.
+func (r *Resolver) RemoveBlocklist(name string) {
+	r.blocklistsMu.Lock()
+	defer r.blocklistsMu.Unlock()
+
+	cur := r.blocklists.Load()
+	if cur == nil {
+		return
+	}
+	if _, ok := cur.byName[name]; !ok {
+		return
+	}
+	next := make(map[string]Blocklist, len(cur.byName)-1)
+	for k, v := range cur.byName {
+		if k == name {
+			continue
+		}
+		next[k] = v
+	}
+	r.blocklists.Store(newBlocklistSet(next))
+}
+
+// Blocklists returns the currently active blocklists in name order. The
+// returned slice is owned by the registry and must not be modified.
 func (r *Resolver) Blocklists() []Blocklist {
 	if p := r.blocklists.Load(); p != nil {
-		return *p
+		return p.list
 	}
 	return nil
+}
+
+// byNameOrEmpty lets SetBlocklist treat a nil pointer as an empty map without
+// special-casing the first call.
+func (s *blocklistSet) byNameOrEmpty() map[string]Blocklist {
+	if s == nil {
+		return nil
+	}
+	return s.byName
 }
 
 func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, error) {

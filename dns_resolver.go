@@ -1,94 +1,28 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"dns_resolver/pkg/types/abp_blocklist"
 	"dns_resolver/pkg/types/hosts"
 	"dns_resolver/pkg/types/resolver"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"strconv"
+	"strings"
 	"time"
 
 	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
 	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
-	"github.com/Motmedel/utils_go/pkg/http/errors"
-	"github.com/Motmedel/utils_go/pkg/http/types/fetch_config"
-	motmedelHttpUtils "github.com/Motmedel/utils_go/pkg/http/utils"
 	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
 	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
 	motmedelLogHandler "github.com/Motmedel/utils_go/pkg/log/handler"
-	"github.com/Motmedel/utils_go/pkg/schema"
 	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
 	"github.com/miekg/dns"
 	"github.com/vphpersson/argument_parser/pkg/argument_parser"
 	"github.com/vphpersson/argument_parser/pkg/types/option"
 	"golang.org/x/sync/errgroup"
 )
-
-// getOisdBigList fetches the OISD big blocklist. If etag or lastModified are
-// non-empty, a conditional request is made; on a 304 Not Modified response
-// this returns (nil, nil) to signal the caller that the current list is still
-// up to date.
-func getOisdBigList(etag string, lastModified string) (*abp_blocklist.List, error) {
-	headers := map[string]string{}
-	if etag != "" {
-		headers["If-None-Match"] = `"` + etag + `"`
-	}
-	if lastModified != "" {
-		headers["If-Modified-Since"] = lastModified
-	}
-
-	response, body, err := motmedelHttpUtils.Fetch(
-		context.Background(),
-		"https://big.oisd.nl",
-		fetch_config.WithHttpClient(&http.Client{Timeout: 10 * time.Second}),
-		fetch_config.WithHeaders(headers),
-		fetch_config.WithSkipErrorOnStatus(true),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fetch: %w", err)
-	}
-	if response == nil {
-		return nil, motmedelErrors.NewWithTrace(errors.ErrNilHttpResponse)
-	}
-
-	if response.StatusCode == http.StatusNotModified {
-		return nil, nil
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, motmedelErrors.NewWithTrace(
-			fmt.Errorf("unexpected status code: %d", response.StatusCode),
-		)
-	}
-
-	list, err := abp_blocklist.FromReader(bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("abp blocklist from reader: %w", err)
-	}
-	if list == nil {
-		return nil, motmedelErrors.NewWithTrace(nil_error.New("list"))
-	}
-
-	newEtag := response.Header.Get("ETag")
-	unquotedEtag, err := strconv.Unquote(newEtag)
-	if err != nil {
-		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("strconv unquote: %w", err), newEtag)
-	}
-
-	list.Rule = &schema.Rule{
-		Id:      unquotedEtag,
-		Name:    "oisd big",
-		Version: response.Header.Get("Last-Modified"),
-	}
-
-	return list, nil
-}
 
 func main() {
 	var logLevel slog.LevelVar
@@ -138,6 +72,7 @@ func main() {
 	var mode string
 	var listenAddresses []string
 	var hostsFile string
+	var blocklistArgs []string
 
 	argumentParser := argument_parser.Parser{
 		Options: []option.Option{
@@ -147,6 +82,7 @@ func main() {
 			option.NewStringOption('m', "mode", "mode", true, &mode),
 			option.NewStringsOption('l', "listen", "listen address", true, &listenAddresses),
 			option.NewStringOption('H', "hosts-file", "hosts file to consult before forwarding", false, &hostsFile),
+			option.NewStringsOption('b', "blocklist", "blocklist NAME=PATH (repeatable)", false, &blocklistArgs),
 		},
 	}
 
@@ -176,15 +112,31 @@ func main() {
 		logger.FatalWithExitingMessage("No listen addresses.", nil)
 	}
 
-	oisdBigList, err := getOisdBigList("", "")
-	if err != nil {
-		logger.FatalWithExitingMessage(
-			"An error occurred when getting the oisd big list.",
-			fmt.Errorf("get oisd big list: %w", err),
-		)
+	type blocklistConfig struct {
+		name string
+		path string
 	}
-	if oisdBigList == nil {
-		logger.FatalWithExitingMessage("The initial oisd big list is empty.", nil)
+
+	var blocklistConfigs []blocklistConfig
+	seenBlocklistNames := map[string]struct{}{}
+	for _, arg := range blocklistArgs {
+		name, path, ok := strings.Cut(arg, "=")
+		name = strings.TrimSpace(name)
+		path = strings.TrimSpace(path)
+		if !ok || name == "" || path == "" {
+			logger.FatalWithExitingMessage(
+				"Malformed blocklist argument; expected NAME=PATH.",
+				motmedelErrors.NewWithTrace(fmt.Errorf("invalid blocklist: %q", arg)),
+			)
+		}
+		if _, dup := seenBlocklistNames[name]; dup {
+			logger.FatalWithExitingMessage(
+				"Duplicate blocklist name.",
+				motmedelErrors.NewWithTrace(fmt.Errorf("duplicate blocklist name: %q", name)),
+			)
+		}
+		seenBlocklistNames[name] = struct{}{}
+		blocklistConfigs = append(blocklistConfigs, blocklistConfig{name: name, path: path})
 	}
 
 	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
@@ -206,7 +158,65 @@ func main() {
 		}
 	}()
 
-	dnsResolver.SetBlocklists([]resolver.Blocklist{oisdBigList})
+	for _, bc := range blocklistConfigs {
+		source := abp_blocklist.New(bc.name, bc.path)
+
+		if changed, err := source.Reload(); err != nil {
+			slog.WarnContext(
+				motmedelContext.WithError(
+					errGroupCtx,
+					motmedelErrors.New(fmt.Errorf("blocklist reload: %w", err), bc.name, bc.path),
+				),
+				"",
+				slog.Group(
+					"event",
+					slog.String("action", "blocklist_load"),
+					slog.String("reason", "An error occurred when loading a blocklist; the resolver will pick the file up if it appears later."),
+					slog.String("kind", "event"),
+					slog.String("outcome", "failure"),
+					slog.Any("category", []string{"file"}),
+					slog.Any("type", []string{"error"}),
+				),
+			)
+		} else if changed {
+			var version string
+			if list := source.Snapshot(); list != nil && list.Rule != nil {
+				version = list.Rule.Version
+			}
+			slog.InfoContext(
+				errGroupCtx,
+				"",
+				slog.Group(
+					"event",
+					slog.String("action", "blocklist_loaded"),
+					slog.String("reason", "A blocklist was loaded."),
+					slog.String("kind", "event"),
+					slog.String("outcome", "success"),
+					slog.Any("category", []string{"file"}),
+					slog.Any("type", []string{"creation"}),
+				),
+				slog.Group(
+					"blocklist",
+					slog.String("name", bc.name),
+					slog.String("path", bc.path),
+					slog.String("version", version),
+				),
+			)
+		}
+
+		dnsResolver.SetBlocklist(bc.name, source)
+
+		errGroup.Go(func() error {
+			if err := source.Watch(errGroupCtx); err != nil {
+				return motmedelErrors.NewWithTrace(
+					fmt.Errorf("blocklist watch: %w", err),
+					bc.name,
+					bc.path,
+				)
+			}
+			return nil
+		})
+	}
 
 	if hostsFile != "" {
 		hostsResolver := hosts.New(hostsFile, 0)
@@ -231,58 +241,6 @@ func main() {
 	}
 
 	go dnsResolver.Cache.StartJanitor(errGroupCtx, 5*time.Minute)
-
-	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
-
-		currentList := oisdBigList
-		for {
-			select {
-			case <-errGroupCtx.Done():
-				return
-			case <-ticker.C:
-				select {
-				case <-errGroupCtx.Done():
-					return
-				default:
-					var etag, lastModified string
-					if rule := currentList.Rule; rule != nil {
-						etag = rule.Id
-						lastModified = rule.Version
-					}
-
-					refreshList, err := getOisdBigList(etag, lastModified)
-					if err != nil {
-						slog.ErrorContext(
-							motmedelContext.WithError(
-								errGroupCtx,
-								fmt.Errorf("get oisd big list: %w", err),
-							),
-							"",
-							slog.Group(
-								"event",
-								slog.String("action", "blocklist_refresh"),
-								slog.String("reason", "An error occurred when getting the oisd big list."),
-								slog.String("kind", "event"),
-								slog.String("outcome", "failure"),
-								slog.Any("category", []string{"network"}),
-								slog.Any("type", []string{"error"}),
-							),
-						)
-						continue
-					}
-					if refreshList == nil {
-						// 304 Not Modified — keep the current list.
-						continue
-					}
-
-					currentList = refreshList
-					dnsResolver.SetBlocklists([]resolver.Blocklist{refreshList})
-				}
-			}
-		}
-	}()
 
 	// TODO: Add (diagnostic) HTTP server as well?
 
