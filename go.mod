@@ -6,6 +6,7 @@ require (
 	github.com/Motmedel/dns_utils v0.0.53
 	github.com/Motmedel/dns_utils/pkg/quic v0.0.3
 	github.com/Motmedel/utils_go v0.0.458
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.59.0
 	github.com/vphpersson/argument_parser v0.0.4

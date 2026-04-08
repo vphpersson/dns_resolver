@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"dns_resolver/pkg/types/abp_blocklist"
+	"dns_resolver/pkg/types/hosts"
 	"dns_resolver/pkg/types/resolver"
 	"fmt"
 	"log/slog"
@@ -136,6 +137,7 @@ func main() {
 	var serverName string
 	var mode string
 	var listenAddresses []string
+	var hostsFile string
 
 	argumentParser := argument_parser.Parser{
 		Options: []option.Option{
@@ -144,6 +146,7 @@ func main() {
 			option.NewStringOption('s', "server", "server name", false, &serverName),
 			option.NewStringOption('m', "mode", "mode", true, &mode),
 			option.NewStringsOption('l', "listen", "listen address", true, &listenAddresses),
+			option.NewStringOption('H', "hosts-file", "hosts file to consult before forwarding", false, &hostsFile),
 		},
 	}
 
@@ -204,6 +207,28 @@ func main() {
 	}()
 
 	dnsResolver.SetBlocklists([]resolver.Blocklist{oisdBigList})
+
+	if hostsFile != "" {
+		hostsResolver := hosts.New(hostsFile, 0)
+		if err := hostsResolver.Reload(); err != nil {
+			logger.FatalWithExitingMessage(
+				"An error occurred when loading the hosts file.",
+				fmt.Errorf("hosts reload: %w", err),
+				hostsFile,
+			)
+		}
+		dnsResolver.Hosts = hostsResolver
+
+		errGroup.Go(func() error {
+			if err := hostsResolver.Watch(errGroupCtx); err != nil {
+				return motmedelErrors.NewWithTrace(
+					fmt.Errorf("hosts watch: %w", err),
+					hostsFile,
+				)
+			}
+			return nil
+		})
+	}
 
 	go dnsResolver.Cache.StartJanitor(errGroupCtx, 5*time.Minute)
 

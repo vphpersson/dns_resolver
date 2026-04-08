@@ -50,6 +50,13 @@ type Blocklist interface {
 	GetRule() *schema.Rule
 }
 
+// HostsResolver answers a request from a local hosts file. Implementations
+// return nil when no entry matches so that the caller falls through to the
+// upstream resolver.
+type HostsResolver interface {
+	Resolve(request *dns.Msg) *dns.Msg
+}
+
 func makeBlockedResponse(request *dns.Msg) *dns.Msg {
 	if request == nil {
 		return nil
@@ -115,6 +122,7 @@ type Resolver struct {
 	Cache         *cache.Cache
 	Mode          string
 	DotConfig     *DotConfig
+	Hosts         HostsResolver
 	blocklists    atomic.Pointer[[]Blocklist]
 }
 
@@ -283,62 +291,95 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	cacheKey := getCacheKey(question)
 	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
 	if !cacheHit || response == nil {
-		var blockedByAnyList bool
-		for _, blocklist := range r.Blocklists() {
-			if !blocklist.IsBlocked(question.Name) {
-				continue
+		if r.Hosts != nil {
+			if hostsResponse := r.Hosts.Resolve(request); hostsResponse != nil {
+				ctxWithDns := dnsUtilsContext.WithDnsContextValue(
+					r.ParentContext,
+					&dnsUtilsTypes.DnsContext{
+						Time:            new(time.Now()),
+						ClientAddress:   remoteAddrString,
+						ServerAddress:   dnsResolverServerAddress,
+						Transport:       transportProtocol,
+						QuestionMessage: request,
+						AnswerMessage:   hostsResponse,
+					},
+				)
+
+				slog.InfoContext(
+					ctxWithDns,
+					"",
+					makeEventGroup(
+						"dns_request_hosts",
+						"A DNS request was answered from the hosts file.",
+						"success",
+						"connection", "protocol", "info",
+					),
+				)
+
+				response = hostsResponse
 			}
-			blockedByAnyList = true
-
-			ctxWithDns := dnsUtilsContext.WithDnsContextValue(
-				r.ParentContext,
-				&dnsUtilsTypes.DnsContext{
-					Time:            new(time.Now()),
-					ClientAddress:   remoteAddrString,
-					ServerAddress:   dnsResolverServerAddress,
-					Transport:       transportProtocol,
-					QuestionMessage: request,
-				},
-			)
-
-			var args []any
-
-			if rule := blocklist.GetRule(); rule != nil {
-				ruleMap, err := motmedelJson.ObjectToMap(rule)
-				if err != nil {
-					slog.ErrorContext(
-						motmedelContext.WithError(ctxWithDns, err),
-						"",
-						makeEventGroup(
-							"rule_serialize",
-							"An error occurred when converting a rule to a map.",
-							"failure",
-							"error",
-						),
-					)
-				} else {
-					args = log.AttrsFromMap(ruleMap)
-				}
-			}
-
-			slog.With(
-				slog.Group("rule", args...),
-			).WarnContext(
-				ctxWithDns,
-				"",
-				makeEventGroup(
-					"dns_request_block",
-					"A DNS request was blocked by a blocklist.",
-					"success",
-					"connection", "protocol", "denied",
-				),
-			)
-			break
 		}
 
-		if blockedByAnyList {
-			response = makeBlockedResponse(request)
-		} else {
+		if response == nil {
+			var blockedByAnyList bool
+			for _, blocklist := range r.Blocklists() {
+				if !blocklist.IsBlocked(question.Name) {
+					continue
+				}
+				blockedByAnyList = true
+
+				ctxWithDns := dnsUtilsContext.WithDnsContextValue(
+					r.ParentContext,
+					&dnsUtilsTypes.DnsContext{
+						Time:            new(time.Now()),
+						ClientAddress:   remoteAddrString,
+						ServerAddress:   dnsResolverServerAddress,
+						Transport:       transportProtocol,
+						QuestionMessage: request,
+					},
+				)
+
+				var args []any
+
+				if rule := blocklist.GetRule(); rule != nil {
+					ruleMap, err := motmedelJson.ObjectToMap(rule)
+					if err != nil {
+						slog.ErrorContext(
+							motmedelContext.WithError(ctxWithDns, err),
+							"",
+							makeEventGroup(
+								"rule_serialize",
+								"An error occurred when converting a rule to a map.",
+								"failure",
+								"error",
+							),
+						)
+					} else {
+						args = log.AttrsFromMap(ruleMap)
+					}
+				}
+
+				slog.With(
+					slog.Group("rule", args...),
+				).WarnContext(
+					ctxWithDns,
+					"",
+					makeEventGroup(
+						"dns_request_block",
+						"A DNS request was blocked by a blocklist.",
+						"success",
+						"connection", "protocol", "denied",
+					),
+				)
+				break
+			}
+
+			if blockedByAnyList {
+				response = makeBlockedResponse(request)
+			}
+		}
+
+		if response == nil {
 			var dnsContext dnsUtilsTypes.DnsContext
 			ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext))
 
