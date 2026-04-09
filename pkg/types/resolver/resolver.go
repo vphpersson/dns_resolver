@@ -92,6 +92,10 @@ func makeBlockedResponse(request *dns.Msg) *dns.Msg {
 		},
 	}
 
+	if opt := request.IsEdns0(); opt != nil {
+		response.SetEdns0(opt.UDPSize(), false)
+	}
+
 	return response
 }
 
@@ -109,6 +113,9 @@ func writeErrorResponse(responseWriter dns.ResponseWriter, request *dns.Msg, rco
 	}
 	response := new(dns.Msg)
 	response.SetRcode(request, rcode)
+	if opt := request.IsEdns0(); opt != nil {
+		response.SetEdns0(opt.UDPSize(), false)
+	}
 	_ = responseWriter.WriteMsg(response)
 }
 
