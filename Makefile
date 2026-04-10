@@ -1,6 +1,6 @@
 BINARY   := dns_resolver
 IMAGE    := dns_resolver
-REGISTRY := registry.vvvp.se
+REGISTRY := registry.home.arpa
 GO_ENV   := GOEXPERIMENT=jsonv2
 
 .PHONY: all build test fmt vet image publish clean
