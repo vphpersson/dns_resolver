@@ -223,6 +223,9 @@ func (h *Hosts) Resolve(request *dns.Msg) *dns.Msg {
 	response.Authoritative = true
 	response.RecursionAvailable = true
 	response.Answer = answers
+	if opt := request.IsEdns0(); opt != nil {
+		response.SetEdns0(opt.UDPSize(), false)
+	}
 	return response
 }
 
