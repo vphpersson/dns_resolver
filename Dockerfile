@@ -15,7 +15,7 @@ RUN GOEXPERIMENT=jsonv2 CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-s -w" -i
 FROM scratch
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/src/bin/app .
+COPY --from=builder /usr/src/bin/app dns_resolver
 USER 1000
 
-ENTRYPOINT ["./app"]
+ENTRYPOINT ["./dns_resolver"]
