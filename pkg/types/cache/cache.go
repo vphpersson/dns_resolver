@@ -12,6 +12,7 @@ type Key struct {
 	Name   string
 	Qtype  uint16
 	Qclass uint16
+	DO     bool
 }
 
 type Entry struct {

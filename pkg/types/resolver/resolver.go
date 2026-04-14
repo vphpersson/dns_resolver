@@ -93,17 +93,25 @@ func makeBlockedResponse(request *dns.Msg) *dns.Msg {
 	}
 
 	if opt := request.IsEdns0(); opt != nil {
-		response.SetEdns0(opt.UDPSize(), false)
+		response.SetEdns0(opt.UDPSize(), opt.Do())
 	}
 
 	return response
 }
 
-func getCacheKey(q dns.Question) cache.Key {
+func requestDO(msg *dns.Msg) bool {
+	if opt := msg.IsEdns0(); opt != nil {
+		return opt.Do()
+	}
+	return false
+}
+
+func getCacheKey(q dns.Question, do bool) cache.Key {
 	return cache.Key{
 		Name:   strings.ToLower(q.Name),
 		Qtype:  q.Qtype,
 		Qclass: q.Qclass,
+		DO:     do,
 	}
 }
 
@@ -114,7 +122,7 @@ func writeErrorResponse(responseWriter dns.ResponseWriter, request *dns.Msg, rco
 	response := new(dns.Msg)
 	response.SetRcode(request, rcode)
 	if opt := request.IsEdns0(); opt != nil {
-		response.SetEdns0(opt.UDPSize(), false)
+		response.SetEdns0(opt.UDPSize(), opt.Do())
 	}
 	_ = responseWriter.WriteMsg(response)
 }
@@ -368,7 +376,8 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	question := requestQuestions[0]
 
 	var response *dns.Msg
-	cacheKey := getCacheKey(question)
+	do := requestDO(request)
+	cacheKey := getCacheKey(question, do)
 	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
 	if !cacheHit || response == nil {
 		if r.Hosts != nil {
@@ -516,6 +525,33 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						"connection", "protocol", "info",
 					),
 				)
+
+				if do {
+					if response.Rcode == dns.RcodeServerFailure {
+						slog.WarnContext(
+							ctxWithTlsDns,
+							"",
+							makeEventGroup(
+								"dnssec_validation",
+								"The upstream returned SERVFAIL for a DNSSEC-enabled query.",
+								"failure",
+								"connection", "protocol", "error",
+							),
+						)
+					} else if response.AuthenticatedData {
+						slog.InfoContext(
+							ctxWithTlsDns,
+							"",
+							makeEventGroup(
+								"dnssec_validation",
+								"The upstream authenticated the response (AD=1).",
+								"success",
+								"connection", "protocol", "info",
+							),
+						)
+					}
+				}
+
 				r.Cache.Set(cacheKey, response, dnsContext.Time)
 			}
 		}

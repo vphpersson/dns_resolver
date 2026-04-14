@@ -2,8 +2,8 @@ github.com/Motmedel/dns_utils v0.0.53 h1:QoPrCNK1ZjBHEQLW96zcmoXrtydvIXX/V79FQ7D
 github.com/Motmedel/dns_utils v0.0.53/go.mod h1:RChZ5DEF9JwqK5rqynfHbBFbvY7Nn77fMIrcAGPuyM4=
 github.com/Motmedel/dns_utils/pkg/quic v0.0.3 h1:mpTeJ4J6NZFC7Ljq50UypCUGgqPZgiQlxl/FnXijgvY=
 github.com/Motmedel/dns_utils/pkg/quic v0.0.3/go.mod h1:1J3olxa3S1Gr0ANaL2JRul4g/rWUL435eSv8K8l7VMo=
-github.com/Motmedel/utils_go v0.0.458 h1:PigELUTUKXE1//57mocmUGE96gT9NALnMI4ZRGTWH+s=
-github.com/Motmedel/utils_go v0.0.458/go.mod h1:st9wrD7tyw4AM64tOD7rs0vO7tMxmXQC1Apm48B+4Q4=
+github.com/Motmedel/utils_go v0.0.463 h1:VbixvtTSat/1KHzgYWK08+a1CShVsiHGZBbAKg50aK8=
+github.com/Motmedel/utils_go v0.0.463/go.mod h1:st9wrD7tyw4AM64tOD7rs0vO7tMxmXQC1Apm48B+4Q4=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
