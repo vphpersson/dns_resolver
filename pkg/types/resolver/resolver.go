@@ -72,7 +72,7 @@ func makeBlockedResponse(request *dns.Msg) *dns.Msg {
 	question := requestQuestions[0]
 
 	response := new(dns.Msg)
-	response.SetRcode(request, dns.RcodeNameError)
+	response.SetRcode(request, dns.RcodeSuccess)
 
 	response.Ns = []dns.RR{
 		&dns.SOA{
