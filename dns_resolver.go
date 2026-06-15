@@ -5,6 +5,7 @@ import (
 	"dns_resolver/pkg/types/abp_blocklist"
 	"dns_resolver/pkg/types/hosts"
 	"dns_resolver/pkg/types/resolver"
+	"dns_resolver/pkg/types/resolver_config"
 	"fmt"
 	"log/slog"
 	"os"
@@ -74,6 +75,14 @@ func main() {
 	var hostsFile string
 	var blocklistArgs []string
 
+	// Pre-seed with the package defaults so the flags are optional; an omitted
+	// flag leaves the default in place. Durations are taken as strings and
+	// parsed after the fact (the argument parser has no duration option).
+	maxConnections := resolver_config.DefaultMaxConnections
+	minWarmConnections := resolver_config.DefaultMinIdleConnections
+	idleTimeoutString := resolver_config.DefaultIdleTimeout.String()
+	keepAliveIntervalString := resolver_config.DefaultKeepAliveInterval.String()
+
 	argumentParser := argument_parser.Parser{
 		Options: []option.Option{
 			option.NewStringOption('f', "forward", "forward address", true, &forwardAddress),
@@ -83,6 +92,10 @@ func main() {
 			option.NewStringsOption('l', "listen", "listen address", true, &listenAddresses),
 			option.NewStringOption('H', "hosts-file", "hosts file to consult before forwarding", false, &hostsFile),
 			option.NewStringsOption('b', "blocklist", "blocklist NAME=PATH (repeatable)", false, &blocklistArgs),
+			option.NewIntOption('c', "max-connections", "max concurrent upstream DoT connections (dot mode)", false, &maxConnections),
+			option.NewIntOption('w', "min-warm-connections", "warm upstream DoT connections kept ready; 0 disables (dot mode)", false, &minWarmConnections),
+			option.NewStringOption('i', "idle-timeout", "idle timeout for surplus pooled connections, e.g. 30s (dot mode)", false, &idleTimeoutString),
+			option.NewStringOption('k', "keepalive-interval", "keep-alive ping interval for warm connections, e.g. 10s; 0 disables (dot mode)", false, &keepAliveIntervalString),
 		},
 	}
 
@@ -110,6 +123,36 @@ func main() {
 
 	if len(listenAddresses) == 0 {
 		logger.FatalWithExitingMessage("No listen addresses.", nil)
+	}
+
+	if maxConnections < 1 {
+		logger.FatalWithExitingMessage(
+			"The max connections must be at least 1.",
+			motmedelErrors.NewWithTrace(fmt.Errorf("invalid max connections: %d", maxConnections)),
+		)
+	}
+
+	if minWarmConnections < 0 {
+		logger.FatalWithExitingMessage(
+			"The min warm connections cannot be negative.",
+			motmedelErrors.NewWithTrace(fmt.Errorf("invalid min warm connections: %d", minWarmConnections)),
+		)
+	}
+
+	idleTimeout, err := time.ParseDuration(idleTimeoutString)
+	if err != nil || idleTimeout < 0 {
+		logger.FatalWithExitingMessage(
+			"The idle timeout is invalid.",
+			motmedelErrors.NewWithTrace(fmt.Errorf("invalid idle timeout %q: %w", idleTimeoutString, err)),
+		)
+	}
+
+	keepAliveInterval, err := time.ParseDuration(keepAliveIntervalString)
+	if err != nil || keepAliveInterval < 0 {
+		logger.FatalWithExitingMessage(
+			"The keepalive interval is invalid.",
+			motmedelErrors.NewWithTrace(fmt.Errorf("invalid keepalive interval %q: %w", keepAliveIntervalString, err)),
+		)
 	}
 
 	type blocklistConfig struct {
@@ -141,7 +184,16 @@ func main() {
 
 	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
 
-	dnsResolver, err := resolver.New(errGroupCtx, mode, forwardAddress, serverName)
+	dnsResolver, err := resolver.New(
+		errGroupCtx,
+		mode,
+		forwardAddress,
+		serverName,
+		resolver_config.WithMaxConnections(maxConnections),
+		resolver_config.WithMinIdleConnections(minWarmConnections),
+		resolver_config.WithIdleTimeout(idleTimeout),
+		resolver_config.WithKeepAliveInterval(keepAliveInterval),
+	)
 	if err != nil {
 		logger.FatalWithExitingMessage(
 			"An error occurred when creating the TCP resolver.",
@@ -241,6 +293,7 @@ func main() {
 	}
 
 	go dnsResolver.Cache.StartJanitor(errGroupCtx, 5*time.Minute)
+	go dnsResolver.StartConnectionMaintenance(errGroupCtx)
 
 	// TODO: Add (diagnostic) HTTP server as well?
 

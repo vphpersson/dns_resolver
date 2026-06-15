@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	dnsResolverErrors "dns_resolver/pkg/errors"
 	"dns_resolver/pkg/types/cache"
+	"dns_resolver/pkg/types/resolver_config"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +33,17 @@ import (
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/vphpersson/connection_pool/pkg/connection_pool"
+)
+
+const (
+	// dialTimeout bounds establishing a new upstream DoT connection, covering
+	// both the TCP and TLS handshakes.
+	dialTimeout = 5 * time.Second
+	// keepAlivePeriod sets the TCP keep-alive interval on upstream DoT
+	// connections. It keeps idle connections warm across middleboxes/NAT and
+	// surfaces dead peers promptly, so a reused-but-closed connection fails
+	// fast on the next exchange instead of stalling until the read timeout.
+	keepAlivePeriod = 30 * time.Second
 )
 
 // makeEventGroup builds an ECS `event` attribute group with the common
@@ -161,7 +174,10 @@ type Resolver struct {
 	Mode          string
 	DotConfig     *DotConfig
 	Hosts         HostsResolver
-	blocklistsMu  sync.Mutex
+	// MaintenanceInterval drives the upstream pool's keep-alive/eviction loop
+	// when started via StartConnectionMaintenance (DoT mode only).
+	MaintenanceInterval time.Duration
+	blocklistsMu        sync.Mutex
 	blocklists    atomic.Pointer[blocklistSet]
 }
 
@@ -655,7 +671,26 @@ func (r *Resolver) Close() error {
 	return nil
 }
 
-func New(ctx context.Context, mode string, serverAddress string, serverName string) (*Resolver, error) {
+// StartConnectionMaintenance runs the upstream connection pool's maintenance
+// loop (idle eviction, keep-alive pings, warm replenishment) until ctx is
+// cancelled. It is a no-op outside DoT mode or when the maintenance interval is
+// not positive. Intended to be run in its own goroutine.
+func (r *Resolver) StartConnectionMaintenance(ctx context.Context) {
+	if r.MaintenanceInterval <= 0 {
+		return
+	}
+	dotConfig := r.DotConfig
+	if dotConfig == nil || dotConfig.ConnectionPool == nil {
+		return
+	}
+	dotConfig.ConnectionPool.StartMaintenance(ctx, r.MaintenanceInterval)
+}
+
+// New constructs a Resolver. Options tune the resolver's settings; in
+// particular WithMaxConnections bounds the number of concurrent upstream DoT
+// connections held by the connection pool (a value <= 0 leaves the pool's own
+// default in place, and it has no effect in "doq" mode).
+func New(ctx context.Context, mode string, serverAddress string, serverName string, options ...resolver_config.Option) (*Resolver, error) {
 	if mode == "" {
 		return nil, motmedelErrors.NewWithTrace(empty_error.New("mode"))
 	}
@@ -663,6 +698,8 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 	if serverAddress == "" {
 		return nil, motmedelErrors.NewWithTrace(empty_error.New("dns server"))
 	}
+
+	config := resolver_config.New(options...)
 
 	resolver := Resolver{
 		ParentContext: ctx,
@@ -674,38 +711,71 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 
 	switch mode {
 	case "dot":
-		client := &dns.Client{Net: "tcp-tls"}
-		if serverName != "" {
-			client.TLSConfig = &tls.Config{ServerName: serverName}
+		// Share a TLS session cache across dials so reconnects resume rather
+		// than perform a full handshake. Verification still pins to serverName
+		// when set, otherwise to the dial host (Go fills it in).
+		tlsConfig := &tls.Config{
+			ClientSessionCache: tls.NewLRUClientSessionCache(0),
 		}
+		if serverName != "" {
+			tlsConfig.ServerName = serverName
+		}
+		client := &dns.Client{
+			Net: "tcp-tls",
+			Dialer: &net.Dialer{
+				Timeout:   dialTimeout,
+				KeepAlive: keepAlivePeriod,
+			},
+			TLSConfig: tlsConfig,
+		}
+		connectionPool := connection_pool.New[*dns.Conn](
+			func() (*dns.Conn, error) {
+				if client == nil {
+					return nil, motmedelErrors.NewWithTrace(nil_error.New("dns client"))
+				}
+
+				resolverServerAddress := resolver.ServerAddress
+				if resolverServerAddress == "" {
+					return nil, motmedelErrors.NewWithTrace(empty_error.New("dns server"))
+				}
+
+				connection, err := client.Dial(resolverServerAddress)
+				if err != nil {
+					return nil, motmedelErrors.NewWithTrace(
+						fmt.Errorf("client dial: %w", err),
+						client,
+						resolverServerAddress,
+					)
+				}
+				if connection == nil {
+					return nil, motmedelErrors.NewWithTrace(nil_error.New("connection"))
+				}
+
+				return connection, nil
+			},
+		)
+		if config.MaxConnections > 0 {
+			connectionPool.MaxNumConnections = config.MaxConnections
+		}
+		connectionPool.IdleTimeout = config.IdleTimeout
+		connectionPool.MinIdleConnections = config.MinIdleConnections
+		connectionPool.Ping = func(connection *dns.Conn) error {
+			if connection == nil {
+				return motmedelErrors.NewWithTrace(nil_error.New("connection"))
+			}
+			// A lightweight query keeps the connection alive (resetting the
+			// upstream's idle timer) and confirms it is still usable. Only a
+			// transport error marks it dead; any rcode is fine, so the bare
+			// miekg exchange is used rather than dns_utils.ExchangeWithConn.
+			pingMessage := new(dns.Msg)
+			pingMessage.SetQuestion(".", dns.TypeNS)
+			_, _, err := client.ExchangeWithConn(pingMessage, connection)
+			return err
+		}
+		resolver.MaintenanceInterval = config.KeepAliveInterval
 		resolver.DotConfig = &DotConfig{
-			Client: client,
-			ConnectionPool: connection_pool.New[*dns.Conn](
-				func() (*dns.Conn, error) {
-					if client == nil {
-						return nil, motmedelErrors.NewWithTrace(nil_error.New("dns client"))
-					}
-
-					resolverServerAddress := resolver.ServerAddress
-					if resolverServerAddress == "" {
-						return nil, motmedelErrors.NewWithTrace(empty_error.New("dns server"))
-					}
-
-					connection, err := client.Dial(resolverServerAddress)
-					if err != nil {
-						return nil, motmedelErrors.NewWithTrace(
-							fmt.Errorf("client dial: %w", err),
-							client,
-							resolverServerAddress,
-						)
-					}
-					if connection == nil {
-						return nil, motmedelErrors.NewWithTrace(nil_error.New("connection"))
-					}
-
-					return connection, nil
-				},
-			),
+			Client:         client,
+			ConnectionPool: connectionPool,
 		}
 	case "doq":
 	default:
