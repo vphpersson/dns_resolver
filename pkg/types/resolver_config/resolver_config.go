@@ -7,16 +7,21 @@ const (
 	// concurrent upstream DoT connections held by the connection pool.
 	DefaultMaxConnections = 5
 	// DefaultIdleTimeout is how long a surplus (non-warm) pooled connection may
-	// sit idle before it is discarded.
-	DefaultIdleTimeout = 30 * time.Second
+	// sit idle before it is discarded. It must stay below the upstream's own
+	// idle-close window, otherwise the pool hands out connections the server has
+	// already closed, and the exchange fails (EOF, or a full read-timeout when
+	// the teardown is a silent drop). Mullvad's DoT endpoint closes idle
+	// connections at ~10s, so 5s keeps a safe margin.
+	DefaultIdleTimeout = 5 * time.Second
 	// DefaultMinIdleConnections is the number of warm connections kept ready so
 	// the common cache-miss query reuses an existing connection rather than
 	// paying a fresh TCP+TLS handshake. 0 disables warm-keeping.
 	DefaultMinIdleConnections = 1
 	// DefaultKeepAliveInterval is how often warm connections are pinged to keep
 	// them alive against the upstream's idle close; it must be shorter than that
-	// idle window to be effective. 0 disables pool maintenance entirely.
-	DefaultKeepAliveInterval = 10 * time.Second
+	// idle window to be effective. At 10s it raced Mullvad's ~10s close, so 5s.
+	// 0 disables pool maintenance entirely.
+	DefaultKeepAliveInterval = 5 * time.Second
 )
 
 // Config holds tunable resolver settings. It is assembled from a set of
