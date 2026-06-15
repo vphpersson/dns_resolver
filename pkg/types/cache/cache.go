@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// maxCacheTtl bounds how long any single entry may live. It defends against an
+// unbounded effective TTL: EffectiveMessageTtl falls back to the uint32 max
+// (~136 years) when no record or SOA supplies a TTL, so without a cap a single
+// odd response could pin a name effectively forever. 24h matches Unbound's
+// cache-max-ttl default.
+const maxCacheTtl = 24 * time.Hour
+
 type Key struct {
 	Name   string
 	Qtype  uint16
@@ -58,6 +65,20 @@ func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) b
 		return false
 	}
 
+	// Only cache authoritative results. NOERROR (positive answers and NODATA)
+	// and NXDOMAIN are statements about the name and are safe to cache; their
+	// TTL is bounded by the record TTLs or the negative-caching SOA MINIMUM.
+	// SERVFAIL/REFUSED/etc. are transient failures, not answers: caching one
+	// turns a momentary upstream or transport hiccup into a sticky, self-
+	// perpetuating outage for the name (and, lacking any record or SOA to
+	// derive a TTL from, it would otherwise be pinned for the ~136-year uint32
+	// sentinel TTL). Re-query instead.
+	switch message.Rcode {
+	case dns.RcodeSuccess, dns.RcodeNameError:
+	default:
+		return false
+	}
+
 	if expirationReference == nil {
 		t := time.Now()
 		expirationReference = &t
@@ -68,8 +89,11 @@ func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) b
 	}
 
 	ttl := dns_utils.EffectiveMessageTtl(message)
-	if ttl == 0 {
+	if ttl <= 0 {
 		return false
+	}
+	if ttl > maxCacheTtl {
+		ttl = maxCacheTtl
 	}
 
 	c.Lock()
