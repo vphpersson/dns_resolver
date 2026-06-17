@@ -6,8 +6,10 @@ import (
 	"dns_resolver/pkg/types/hosts"
 	"dns_resolver/pkg/types/resolver"
 	"dns_resolver/pkg/types/resolver_config"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -74,6 +76,7 @@ func main() {
 	var listenAddresses []string
 	var hostsFile string
 	var blocklistArgs []string
+	var infoAddress string
 
 	// Pre-seed with the package defaults so the flags are optional; an omitted
 	// flag leaves the default in place. Durations are taken as strings and
@@ -96,6 +99,7 @@ func main() {
 			option.NewIntOption('w', "min-warm-connections", "warm upstream DoT connections kept ready; 0 disables (dot mode)", false, &minWarmConnections),
 			option.NewStringOption('i', "idle-timeout", "idle timeout for surplus pooled connections, e.g. 30s (dot mode)", false, &idleTimeoutString),
 			option.NewStringOption('k', "keepalive-interval", "keep-alive ping interval for warm connections, e.g. 10s; 0 disables (dot mode)", false, &keepAliveIntervalString),
+			option.NewStringOption('I', "info", "address:port for the diagnostic HTTP server (/metrics, /cache); omit to disable. Bind to loopback/LAN only", false, &infoAddress),
 		},
 	}
 
@@ -295,7 +299,21 @@ func main() {
 	go dnsResolver.Cache.StartJanitor(errGroupCtx, 5*time.Minute)
 	go dnsResolver.StartConnectionMaintenance(errGroupCtx)
 
-	// TODO: Add (diagnostic) HTTP server as well?
+	if infoAddress != "" {
+		errGroup.Go(func() error {
+			server := &http.Server{Addr: infoAddress, Handler: dnsResolver.DiagnosticsHandler()}
+			// Shut the diagnostic server down when the group context ends so it
+			// does not keep the process alive after the DNS servers exit.
+			context.AfterFunc(errGroupCtx, func() { _ = server.Close() })
+			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return motmedelErrors.NewWithTrace(
+					fmt.Errorf("diagnostics http server listen and serve: %w", err),
+					infoAddress,
+				)
+			}
+			return nil
+		})
+	}
 
 	for _, listenAddress := range listenAddresses {
 		for _, transportProtocol := range []string{"udp", "tcp"} {

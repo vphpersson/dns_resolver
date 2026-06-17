@@ -166,6 +166,37 @@ func newBlocklistSet(byName map[string]Blocklist) *blocklistSet {
 	return &blocklistSet{byName: byName, list: list}
 }
 
+// resolverMetrics holds the process-lifetime counters surfaced by the
+// diagnostic /metrics endpoint. All fields are updated with atomic adds from
+// ServeDNS and the DoT exchange path, so they are safe to read concurrently via
+// Metrics.
+type resolverMetrics struct {
+	queriesTotal     atomic.Uint64
+	responseNoerror  atomic.Uint64
+	responseNxdomain atomic.Uint64
+	responseServfail atomic.Uint64
+	responseOther    atomic.Uint64
+	blocked          atomic.Uint64
+	hostsAnswered    atomic.Uint64
+	upstreamErrors   atomic.Uint64
+	exchangeErrors   atomic.Uint64
+}
+
+// Metrics is a point-in-time snapshot of the resolver counters plus the cache
+// stats, serialised by the /metrics endpoint.
+type Metrics struct {
+	QueriesTotal     uint64      `json:"queries_total"`
+	ResponseNoerror  uint64      `json:"response_noerror"`
+	ResponseNxdomain uint64      `json:"response_nxdomain"`
+	ResponseServfail uint64      `json:"response_servfail"`
+	ResponseOther    uint64      `json:"response_other"`
+	Blocked          uint64      `json:"blocked"`
+	HostsAnswered    uint64      `json:"hosts_answered"`
+	UpstreamErrors   uint64      `json:"upstream_errors"`
+	ExchangeErrors   uint64      `json:"exchange_errors"`
+	Cache            cache.Stats `json:"cache"`
+}
+
 type Resolver struct {
 	ParentContext context.Context
 	ServerAddress string
@@ -177,8 +208,42 @@ type Resolver struct {
 	// MaintenanceInterval drives the upstream pool's keep-alive/eviction loop
 	// when started via StartConnectionMaintenance (DoT mode only).
 	MaintenanceInterval time.Duration
+	metrics             resolverMetrics
 	blocklistsMu        sync.Mutex
-	blocklists    atomic.Pointer[blocklistSet]
+	blocklists          atomic.Pointer[blocklistSet]
+}
+
+// Metrics returns a snapshot of the resolver and cache counters.
+func (r *Resolver) Metrics() Metrics {
+	m := Metrics{
+		QueriesTotal:     r.metrics.queriesTotal.Load(),
+		ResponseNoerror:  r.metrics.responseNoerror.Load(),
+		ResponseNxdomain: r.metrics.responseNxdomain.Load(),
+		ResponseServfail: r.metrics.responseServfail.Load(),
+		ResponseOther:    r.metrics.responseOther.Load(),
+		Blocked:          r.metrics.blocked.Load(),
+		HostsAnswered:    r.metrics.hostsAnswered.Load(),
+		UpstreamErrors:   r.metrics.upstreamErrors.Load(),
+		ExchangeErrors:   r.metrics.exchangeErrors.Load(),
+	}
+	if r.Cache != nil {
+		m.Cache = r.Cache.Stats()
+	}
+	return m
+}
+
+// countResponseRcode buckets a response by its rcode for the metrics counters.
+func (r *Resolver) countResponseRcode(rcode int) {
+	switch rcode {
+	case dns.RcodeSuccess:
+		r.metrics.responseNoerror.Add(1)
+	case dns.RcodeNameError:
+		r.metrics.responseNxdomain.Add(1)
+	case dns.RcodeServerFailure:
+		r.metrics.responseServfail.Add(1)
+	default:
+		r.metrics.responseOther.Add(1)
+	}
 }
 
 // SetBlocklist installs (or replaces) a named blocklist. The read path is
@@ -276,6 +341,8 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 			if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
 				return true, nil
 			}
+
+			r.metrics.exchangeErrors.Add(1)
 
 			if !motmedelErrors.IsClosedError(err) {
 				slog.WarnContext(
@@ -391,6 +458,8 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	question := requestQuestions[0]
 
+	r.metrics.queriesTotal.Add(1)
+
 	var response *dns.Msg
 	do := requestDO(request)
 	cacheKey := getCacheKey(question, do)
@@ -421,6 +490,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 					),
 				)
 
+				r.metrics.hostsAnswered.Add(1)
 				response = hostsResponse
 			}
 		}
@@ -480,6 +550,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 			}
 
 			if blockedByAnyList {
+				r.metrics.blocked.Add(1)
 				response = makeBlockedResponse(request)
 			}
 		}
@@ -526,6 +597,8 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						"connection", "protocol", "error",
 					),
 				)
+				r.metrics.upstreamErrors.Add(1)
+				r.metrics.responseServfail.Add(1)
 				writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
 				return
 			}
@@ -587,9 +660,12 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				"protocol", "error",
 			),
 		)
+		r.metrics.responseServfail.Add(1)
 		writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
 		return
 	}
+
+	r.countResponseRcode(response.Rcode)
 
 	// Apply changes to the response so that it can be used with the request.
 
