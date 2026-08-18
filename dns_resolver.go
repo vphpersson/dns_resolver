@@ -15,15 +15,15 @@ import (
 	"time"
 
 	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
-	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
-	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
-	motmedelLogHandler "github.com/Motmedel/utils_go/pkg/log/handler"
-	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
 	argumentParserPkg "github.com/altshiftab/utils_go/pkg/cli/argument_parser"
 	argumentParserErrors "github.com/altshiftab/utils_go/pkg/cli/argument_parser/errors"
 	"github.com/altshiftab/utils_go/pkg/cli/argument_parser/option"
+	altshiftContext "github.com/altshiftab/utils_go/pkg/context"
+	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
+	altshiftLog "github.com/altshiftab/utils_go/pkg/log"
+	altshiftErrorLogger "github.com/altshiftab/utils_go/pkg/log/error_logger"
+	motmedelLogHandler "github.com/altshiftab/utils_go/pkg/log/handler"
+	schemaUtils "github.com/altshiftab/utils_go/pkg/schema/utils"
 	"github.com/miekg/dns"
 	"golang.org/x/sync/errgroup"
 )
@@ -61,9 +61,9 @@ func main() {
 		return attr
 	}
 
-	logger := &motmedelErrorLogger.Logger{
+	logger := &altshiftErrorLogger.Logger{
 		Logger: slog.New(
-			&motmedelLog.ContextHandler{
+			&altshiftLog.ContextHandler{
 				Next: motmedelLogHandler.New(
 					slog.NewJSONHandler(
 						os.Stdout,
@@ -74,9 +74,9 @@ func main() {
 						},
 					),
 				),
-				Extractors: []motmedelLog.ContextExtractor{
-					&motmedelLog.ErrorContextExtractor{
-						ContextExtractors: []motmedelLog.ContextExtractor{
+				Extractors: []altshiftLog.ContextExtractor{
+					&altshiftLog.ErrorContextExtractor{
+						ContextExtractors: []altshiftLog.ContextExtractor{
 							&motmedelDnsLog.DnsContextExtractor,
 						},
 					},
@@ -126,7 +126,7 @@ func main() {
 	if err := parser.Validate(); err != nil {
 		logger.FatalWithExitingMessage(
 			"An error occurred when validating the argument parser.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("argument parser validate: %w", err)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("argument parser validate: %w", err)),
 		)
 	}
 
@@ -138,7 +138,7 @@ func main() {
 
 		logger.FatalWithExitingMessage(
 			"An error occurred when parsing the arguments.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("argument parser parse: %w", err)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("argument parser parse: %w", err)),
 		)
 	}
 
@@ -164,14 +164,14 @@ func main() {
 	if maxConnections < 1 {
 		logger.FatalWithExitingMessage(
 			"The max connections must be at least 1.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxConnections, maxConnections)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxConnections, maxConnections)),
 		)
 	}
 
 	if minWarmConnections < 0 {
 		logger.FatalWithExitingMessage(
 			"The min warm connections cannot be negative.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMinWarmConnections, minWarmConnections)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMinWarmConnections, minWarmConnections)),
 		)
 	}
 
@@ -179,7 +179,7 @@ func main() {
 	if err != nil || idleTimeout < 0 {
 		logger.FatalWithExitingMessage(
 			"The idle timeout is invalid.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("invalid idle timeout %q: %w", idleTimeoutString, err)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("invalid idle timeout %q: %w", idleTimeoutString, err)),
 		)
 	}
 
@@ -187,7 +187,7 @@ func main() {
 	if err != nil || keepAliveInterval < 0 {
 		logger.FatalWithExitingMessage(
 			"The keepalive interval is invalid.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("invalid keepalive interval %q: %w", keepAliveIntervalString, err)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("invalid keepalive interval %q: %w", keepAliveIntervalString, err)),
 		)
 	}
 
@@ -205,13 +205,13 @@ func main() {
 		if !ok || name == "" || path == "" {
 			logger.FatalWithExitingMessage(
 				"Malformed blocklist argument; expected NAME=PATH.",
-				motmedelErrors.NewWithTrace(fmt.Errorf("%w: %q", errInvalidBlocklist, arg)),
+				altshiftErrors.NewWithTrace(fmt.Errorf("%w: %q", errInvalidBlocklist, arg)),
 			)
 		}
 		if _, dup := seenBlocklistNames[name]; dup {
 			logger.FatalWithExitingMessage(
 				"Duplicate blocklist name.",
-				motmedelErrors.NewWithTrace(fmt.Errorf("%w: %q", errDuplicateBlocklistName, name)),
+				altshiftErrors.NewWithTrace(fmt.Errorf("%w: %q", errDuplicateBlocklistName, name)),
 			)
 		}
 		seenBlocklistNames[name] = struct{}{}
@@ -241,7 +241,7 @@ func main() {
 		if err := dnsResolver.Close(); err != nil {
 			logger.Warning(
 				"An error occurred when closing the resolver.",
-				motmedelErrors.New(fmt.Errorf("resolver close: %w", err), dnsResolver),
+				altshiftErrors.New(fmt.Errorf("resolver close: %w", err), dnsResolver),
 			)
 		}
 	}()
@@ -251,9 +251,9 @@ func main() {
 
 		if changed, err := source.Reload(); err != nil {
 			slog.WarnContext(
-				motmedelContext.WithError(
+				altshiftContext.WithError(
 					errGroupCtx,
-					motmedelErrors.New(fmt.Errorf("blocklist reload: %w", err), bc.name, bc.path),
+					altshiftErrors.New(fmt.Errorf("blocklist reload: %w", err), bc.name, bc.path),
 				),
 				"",
 				slog.Group(
@@ -296,7 +296,7 @@ func main() {
 
 		errGroup.Go(func() error {
 			if err := source.Watch(errGroupCtx); err != nil {
-				return motmedelErrors.NewWithTrace(
+				return altshiftErrors.NewWithTrace(
 					fmt.Errorf("blocklist watch: %w", err),
 					bc.name,
 					bc.path,
@@ -319,7 +319,7 @@ func main() {
 
 		errGroup.Go(func() error {
 			if err := hostsResolver.Watch(errGroupCtx); err != nil {
-				return motmedelErrors.NewWithTrace(
+				return altshiftErrors.NewWithTrace(
 					fmt.Errorf("hosts watch: %w", err),
 					hostsFile,
 				)
@@ -347,7 +347,7 @@ func main() {
 			// does not keep the process alive after the DNS servers exit.
 			context.AfterFunc(errGroupCtx, func() { _ = server.Close() })
 			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				return motmedelErrors.NewWithTrace(
+				return altshiftErrors.NewWithTrace(
 					fmt.Errorf("diagnostics http server listen and serve: %w", err),
 					infoAddress,
 				)
@@ -362,7 +362,7 @@ func main() {
 				func() error {
 					server := &dns.Server{Addr: listenAddress, Net: transportProtocol, Handler: dnsResolver}
 					if err := server.ListenAndServe(); err != nil {
-						return motmedelErrors.NewWithTrace(
+						return altshiftErrors.NewWithTrace(
 							fmt.Errorf("dns server listen and serve (%s): %w", transportProtocol, err),
 							listenAddress,
 						)

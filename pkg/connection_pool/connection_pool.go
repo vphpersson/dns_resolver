@@ -10,9 +10,9 @@ import (
 	"time"
 
 	dnsResolverErrors "dns_resolver/pkg/errors"
-	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
+	altshiftContext "github.com/altshiftab/utils_go/pkg/context"
+	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
+	"github.com/altshiftab/utils_go/pkg/errors/types/nil_error"
 )
 
 // idleConnection pairs a pooled connection with the time it was last returned
@@ -66,11 +66,11 @@ func (pool *Pool[T]) closeConnection(ctx context.Context, connection T) {
 	if io.Closer(connection) == nil {
 		return
 	}
-	if closeErr := connection.Close(); closeErr != nil && !motmedelErrors.IsClosedError(closeErr) {
+	if closeErr := connection.Close(); closeErr != nil && !altshiftErrors.IsClosedError(closeErr) {
 		slog.WarnContext(
-			motmedelContext.WithError(
+			altshiftContext.WithError(
 				ctx,
-				motmedelErrors.NewWithTrace(fmt.Errorf("connection close: %w", closeErr), connection),
+				altshiftErrors.NewWithTrace(fmt.Errorf("connection close: %w", closeErr), connection),
 			),
 			"An error occurred when closing a connection.",
 		)
@@ -110,7 +110,7 @@ func (pool *Pool[T]) Get(ctx context.Context) (T, error) {
 	for {
 		if pool.closed {
 			pool.mutex.Unlock()
-			return zero, motmedelErrors.NewWithTrace(dnsResolverErrors.ErrClosedPool)
+			return zero, altshiftErrors.NewWithTrace(dnsResolverErrors.ErrClosedPool)
 		}
 		if err := ctx.Err(); err != nil {
 			pool.mutex.Unlock()
@@ -125,8 +125,8 @@ func (pool *Pool[T]) Get(ctx context.Context) (T, error) {
 			idle, ok := element.(idleConnection[T])
 			if !ok {
 				pool.mutex.Unlock()
-				return zero, motmedelErrors.NewWithTrace(
-					fmt.Errorf("%w (generic io.Closer)", motmedelErrors.ErrConversionNotOk),
+				return zero, altshiftErrors.NewWithTrace(
+					fmt.Errorf("%w (generic io.Closer)", altshiftErrors.ErrConversionNotOk),
 					element,
 				)
 			}
@@ -173,7 +173,7 @@ func (pool *Pool[T]) Get(ctx context.Context) (T, error) {
 		pool.numActiveConnections--
 		pool.condition.Signal()
 		pool.mutex.Unlock()
-		return zero, motmedelErrors.NewWithTrace(nil_error.New("connection"))
+		return zero, altshiftErrors.NewWithTrace(nil_error.New("connection"))
 	}
 
 	pool.mutex.Lock()
@@ -182,7 +182,7 @@ func (pool *Pool[T]) Get(ctx context.Context) (T, error) {
 		pool.condition.Broadcast()
 		pool.mutex.Unlock()
 		_ = connection.Close()
-		return zero, motmedelErrors.NewWithTrace(dnsResolverErrors.ErrClosedPool)
+		return zero, altshiftErrors.NewWithTrace(dnsResolverErrors.ErrClosedPool)
 	}
 	pool.mutex.Unlock()
 
@@ -354,9 +354,9 @@ func (pool *Pool[T]) replenish(ctx context.Context) {
 			pool.mutex.Unlock()
 
 			slog.WarnContext(
-				motmedelContext.WithError(
+				altshiftContext.WithError(
 					ctx,
-					motmedelErrors.NewWithTrace(fmt.Errorf("make connection: %w", err)),
+					altshiftErrors.NewWithTrace(fmt.Errorf("make connection: %w", err)),
 				),
 				"An error occurred when replenishing a connection.",
 			)
@@ -412,7 +412,7 @@ func (pool *Pool[T]) Close() error {
 	var firstErr error
 	for _, connection := range toClose {
 		if err := connection.Close(); err != nil && firstErr == nil {
-			firstErr = motmedelErrors.NewWithTrace(fmt.Errorf("connection close: %w", err), connection)
+			firstErr = altshiftErrors.NewWithTrace(fmt.Errorf("connection close: %w", err), connection)
 		}
 	}
 	return firstErr

@@ -23,14 +23,14 @@ import (
 	dnsUtilsErrors "github.com/Motmedel/dns_utils/pkg/errors"
 	dnsUtilsQuic "github.com/Motmedel/dns_utils/pkg/quic"
 	dnsUtilsTypes "github.com/Motmedel/dns_utils/pkg/types"
-	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/Motmedel/utils_go/pkg/errors/types/empty_error"
-	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
-	motmedelJson "github.com/Motmedel/utils_go/pkg/json"
-	"github.com/Motmedel/utils_go/pkg/log"
-	"github.com/Motmedel/utils_go/pkg/schema"
-	motmedelTlsContext "github.com/Motmedel/utils_go/pkg/tls/context"
+	altshiftContext "github.com/altshiftab/utils_go/pkg/context"
+	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
+	"github.com/altshiftab/utils_go/pkg/errors/types/empty_error"
+	"github.com/altshiftab/utils_go/pkg/errors/types/nil_error"
+	altshiftJson "github.com/altshiftab/utils_go/pkg/json"
+	"github.com/altshiftab/utils_go/pkg/log"
+	"github.com/altshiftab/utils_go/pkg/schema"
+	altshiftTlsContext "github.com/altshiftab/utils_go/pkg/tls/context"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
@@ -315,17 +315,17 @@ func (s *blocklistSet) byNameOrEmpty() map[string]Blocklist {
 func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, error) {
 	dotConfig := r.DotConfig
 	if dotConfig == nil {
-		return nil, motmedelErrors.NewWithTrace(nil_error.New("dot config"))
+		return nil, altshiftErrors.NewWithTrace(nil_error.New("dot config"))
 	}
 
 	client := dotConfig.Client
 	if client == nil {
-		return nil, motmedelErrors.NewWithTrace(nil_error.New("dns client"))
+		return nil, altshiftErrors.NewWithTrace(nil_error.New("dns client"))
 	}
 
 	connectionPool := dotConfig.ConnectionPool
 	if connectionPool == nil {
-		return nil, motmedelErrors.NewWithTrace(nil_error.New("connection pool"))
+		return nil, altshiftErrors.NewWithTrace(nil_error.New("connection pool"))
 	}
 
 	var response *dns.Msg
@@ -337,7 +337,7 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 
 			connection, err = connectionPool.Get(ctx)
 			if err != nil {
-				return false, motmedelErrors.New(fmt.Errorf("connection pool get: %w", err), connectionPool)
+				return false, altshiftErrors.New(fmt.Errorf("connection pool get: %w", err), connectionPool)
 			}
 			defer func() {
 				connectionPool.Put(ctx, connection, err)
@@ -350,9 +350,9 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 
 			r.metrics.exchangeErrors.Add(1)
 
-			if !motmedelErrors.IsClosedError(err) {
+			if !altshiftErrors.IsClosedError(err) {
 				slog.WarnContext(
-					motmedelContext.WithError(ctx, err),
+					altshiftContext.WithError(ctx, err),
 					"",
 					makeEventGroup(
 						"dns_exchange",
@@ -402,9 +402,9 @@ func (r *Resolver) handleDoq(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg) {
 	if request == nil {
 		slog.WarnContext(
-			motmedelContext.WithError(
+			altshiftContext.WithError(
 				r.LifetimeContext,
-				motmedelErrors.NewWithTrace(nil_error.New("request")),
+				altshiftErrors.NewWithTrace(nil_error.New("request")),
 			),
 			"",
 			makeEventGroup(
@@ -420,9 +420,9 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	requestQuestions := request.Question
 	if len(requestQuestions) == 0 {
 		slog.WarnContext(
-			motmedelContext.WithError(
+			altshiftContext.WithError(
 				r.LifetimeContext,
-				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNoQuestions),
+				altshiftErrors.NewWithTrace(dnsResolverErrors.ErrNoQuestions),
 			),
 			"",
 			makeEventGroup(
@@ -438,9 +438,9 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	remoteAddr := responseWriter.RemoteAddr()
 	if remoteAddr == nil {
 		slog.WarnContext(
-			motmedelContext.WithError(
+			altshiftContext.WithError(
 				r.LifetimeContext,
-				motmedelErrors.NewWithTrace(nil_error.New("remote address")),
+				altshiftErrors.NewWithTrace(nil_error.New("remote address")),
 			),
 			"",
 			makeEventGroup(
@@ -523,10 +523,10 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				var args []any
 
 				if rule := blocklist.GetRule(); rule != nil {
-					ruleMap, err := motmedelJson.ObjectToMap(rule)
+					ruleMap, err := altshiftJson.ObjectToMap(rule)
 					if err != nil {
 						slog.ErrorContext(
-							motmedelContext.WithError(ctxWithDns, err),
+							altshiftContext.WithError(ctxWithDns, err),
 							"",
 							makeEventGroup(
 								"rule_serialize",
@@ -563,7 +563,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 		if response == nil {
 			var dnsContext dnsUtilsTypes.DnsContext
-			ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.LifetimeContext, &dnsContext))
+			ctxWithTlsDns := altshiftTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.LifetimeContext, &dnsContext))
 
 			var err error
 			switch r.Mode {
@@ -573,9 +573,9 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				response, err = r.handleDoq(ctxWithTlsDns, request)
 			default:
 				slog.ErrorContext(
-					motmedelContext.WithError(
+					altshiftContext.WithError(
 						ctxWithTlsDns,
-						motmedelErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, r.Mode)),
+						altshiftErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, r.Mode)),
 					),
 					"",
 					makeEventGroup(
@@ -591,9 +591,9 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 			if err != nil {
 				slog.ErrorContext(
-					motmedelContext.WithError(
+					altshiftContext.WithError(
 						ctxWithTlsDns,
-						motmedelErrors.New(fmt.Errorf("handle: %w", err), request),
+						altshiftErrors.New(fmt.Errorf("handle: %w", err), request),
 					),
 					"",
 					makeEventGroup(
@@ -654,9 +654,9 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	if response == nil {
 		slog.ErrorContext(
-			motmedelContext.WithError(
+			altshiftContext.WithError(
 				r.LifetimeContext,
-				motmedelErrors.NewWithTrace(nil_error.New("response")),
+				altshiftErrors.NewWithTrace(nil_error.New("response")),
 			),
 			"",
 			makeEventGroup(
@@ -707,9 +707,9 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	if err := responseWriter.WriteMsg(response); err != nil {
 		slog.ErrorContext(
-			motmedelContext.WithError(
+			altshiftContext.WithError(
 				ctxWithDns,
-				motmedelErrors.New(fmt.Errorf("response writer write msg: %w", err), response),
+				altshiftErrors.New(fmt.Errorf("response writer write msg: %w", err), response),
 			),
 			"",
 			makeEventGroup(
@@ -747,7 +747,7 @@ func (r *Resolver) Close() error {
 	}
 
 	if err := connectionPool.Close(); err != nil {
-		return motmedelErrors.New(fmt.Errorf("connection pool close: %w", err), connectionPool)
+		return altshiftErrors.New(fmt.Errorf("connection pool close: %w", err), connectionPool)
 	}
 
 	return nil
@@ -774,11 +774,11 @@ func (r *Resolver) StartConnectionMaintenance(ctx context.Context) {
 // default in place, and it has no effect in "doq" mode).
 func New(ctx context.Context, mode string, serverAddress string, serverName string, options ...resolver_config.Option) (*Resolver, error) {
 	if mode == "" {
-		return nil, motmedelErrors.NewWithTrace(empty_error.New("mode"))
+		return nil, altshiftErrors.NewWithTrace(empty_error.New("mode"))
 	}
 
 	if serverAddress == "" {
-		return nil, motmedelErrors.NewWithTrace(empty_error.New("dns server"))
+		return nil, altshiftErrors.NewWithTrace(empty_error.New("dns server"))
 	}
 
 	config := resolver_config.New(options...)
@@ -813,24 +813,24 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 		connectionPool := connection_pool.New[*dns.Conn](
 			func() (*dns.Conn, error) {
 				if client == nil {
-					return nil, motmedelErrors.NewWithTrace(nil_error.New("dns client"))
+					return nil, altshiftErrors.NewWithTrace(nil_error.New("dns client"))
 				}
 
 				resolverServerAddress := resolver.ServerAddress
 				if resolverServerAddress == "" {
-					return nil, motmedelErrors.NewWithTrace(empty_error.New("dns server"))
+					return nil, altshiftErrors.NewWithTrace(empty_error.New("dns server"))
 				}
 
 				connection, err := client.Dial(resolverServerAddress)
 				if err != nil {
-					return nil, motmedelErrors.NewWithTrace(
+					return nil, altshiftErrors.NewWithTrace(
 						fmt.Errorf("client dial: %w", err),
 						client,
 						resolverServerAddress,
 					)
 				}
 				if connection == nil {
-					return nil, motmedelErrors.NewWithTrace(nil_error.New("connection"))
+					return nil, altshiftErrors.NewWithTrace(nil_error.New("connection"))
 				}
 
 				return connection, nil
@@ -843,7 +843,7 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 		connectionPool.MinIdleConnections = config.MinIdleConnections
 		connectionPool.Ping = func(connection *dns.Conn) error {
 			if connection == nil {
-				return motmedelErrors.NewWithTrace(nil_error.New("connection"))
+				return altshiftErrors.NewWithTrace(nil_error.New("connection"))
 			}
 			// A lightweight query keeps the connection alive (resetting the
 			// upstream's idle timer) and confirms it is still usable. Only a
@@ -861,7 +861,7 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 		}
 	case "doq":
 	default:
-		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, mode))
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, mode))
 	}
 
 	return &resolver, nil

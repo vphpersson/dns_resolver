@@ -13,9 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 
-	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/Motmedel/utils_go/pkg/schema"
+	altshiftContext "github.com/altshiftab/utils_go/pkg/context"
+	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
+	"github.com/altshiftab/utils_go/pkg/schema"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/net/idna"
 )
@@ -172,7 +172,7 @@ func FromBytes(name string, data []byte) (*List, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("scanner err: %w", err), scanner)
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("scanner err: %w", err), scanner)
 	}
 
 	sum := sha256.Sum256(data)
@@ -276,12 +276,12 @@ func (s *Source) Reload() (bool, error) {
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
-		return false, motmedelErrors.New(fmt.Errorf("os read file: %w", err), s.path)
+		return false, altshiftErrors.New(fmt.Errorf("os read file: %w", err), s.path)
 	}
 
 	list, err := FromBytes(s.name, data)
 	if err != nil {
-		return false, motmedelErrors.New(fmt.Errorf("from bytes: %w", err), s.path)
+		return false, altshiftErrors.New(fmt.Errorf("from bytes: %w", err), s.path)
 	}
 
 	prev := s.snapshot.Load()
@@ -304,19 +304,19 @@ func (s *Source) Watch(ctx context.Context) error {
 
 	absPath, err := filepath.Abs(s.path)
 	if err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("filepath abs: %w", err), s.path)
+		return altshiftErrors.NewWithTrace(fmt.Errorf("filepath abs: %w", err), s.path)
 	}
 	dir := filepath.Dir(absPath)
 	base := filepath.Base(absPath)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("fsnotify new watcher: %w", err))
+		return altshiftErrors.NewWithTrace(fmt.Errorf("fsnotify new watcher: %w", err))
 	}
 	defer watcher.Close()
 
 	if err := watcher.Add(dir); err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("fsnotify watcher add: %w", err), dir)
+		return altshiftErrors.NewWithTrace(fmt.Errorf("fsnotify watcher add: %w", err), dir)
 	}
 
 	for {
@@ -336,9 +336,9 @@ func (s *Source) Watch(ctx context.Context) error {
 			changed, err := s.Reload()
 			if err != nil {
 				slog.ErrorContext(
-					motmedelContext.WithError(
+					altshiftContext.WithError(
 						ctx,
-						motmedelErrors.New(fmt.Errorf("reload: %w", err), s.name, s.path),
+						altshiftErrors.New(fmt.Errorf("reload: %w", err), s.name, s.path),
 					),
 					"",
 					slog.Group(
@@ -398,9 +398,9 @@ func (s *Source) Watch(ctx context.Context) error {
 				return nil
 			}
 			slog.WarnContext(
-				motmedelContext.WithError(
+				altshiftContext.WithError(
 					ctx,
-					motmedelErrors.New(fmt.Errorf("fsnotify watcher: %w", err), s.name, s.path),
+					altshiftErrors.New(fmt.Errorf("fsnotify watcher: %w", err), s.name, s.path),
 				),
 				"",
 				slog.Group(

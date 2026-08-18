@@ -12,8 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	motmedelContext "github.com/Motmedel/utils_go/pkg/context"
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	altshiftContext "github.com/altshiftab/utils_go/pkg/context"
+	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
 	"github.com/fsnotify/fsnotify"
 	"github.com/miekg/dns"
 )
@@ -94,7 +94,7 @@ func ParseReader(reader io.Reader) (*Entries, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("scanner err: %w", err))
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("scanner err: %w", err))
 	}
 
 	return &Entries{v4: v4, v6: v6}, nil
@@ -104,13 +104,13 @@ func ParseReader(reader io.Reader) (*Entries, error) {
 func Load(path string) (*Entries, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("os open: %w", err), path)
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("os open: %w", err), path)
 	}
 	defer file.Close()
 
 	entries, err := ParseReader(file)
 	if err != nil {
-		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("parse reader: %w", err), path)
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("parse reader: %w", err), path)
 	}
 	return entries, nil
 }
@@ -148,7 +148,7 @@ func (h *Hosts) Reload() error {
 	}
 	entries, err := Load(h.path)
 	if err != nil {
-		return motmedelErrors.New(fmt.Errorf("load: %w", err), h.path)
+		return altshiftErrors.New(fmt.Errorf("load: %w", err), h.path)
 	}
 	h.entries.Store(entries)
 	return nil
@@ -240,24 +240,24 @@ func (h *Hosts) Watch(ctx context.Context) error {
 
 	absPath, err := filepath.Abs(h.path)
 	if err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("filepath abs: %w", err), h.path)
+		return altshiftErrors.NewWithTrace(fmt.Errorf("filepath abs: %w", err), h.path)
 	}
 	dir := filepath.Dir(absPath)
 	name := filepath.Base(absPath)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("fsnotify new watcher: %w", err))
+		return altshiftErrors.NewWithTrace(fmt.Errorf("fsnotify new watcher: %w", err))
 	}
 	defer watcher.Close()
 
 	if err := watcher.Add(dir); err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("fsnotify watcher add: %w", err), dir)
+		return altshiftErrors.NewWithTrace(fmt.Errorf("fsnotify watcher add: %w", err), dir)
 	}
 
 	logReloadError := func(err error) {
 		slog.ErrorContext(
-			motmedelContext.WithError(
+			altshiftContext.WithError(
 				ctx,
 				fmt.Errorf("hosts reload: %w", err),
 			),
@@ -296,7 +296,7 @@ func (h *Hosts) Watch(ctx context.Context) error {
 				return nil
 			}
 			slog.WarnContext(
-				motmedelContext.WithError(
+				altshiftContext.WithError(
 					ctx,
 					fmt.Errorf("fsnotify watcher: %w", err),
 				),

@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/Motmedel/utils_go/pkg/http/mux"
-	muxEndpoint "github.com/Motmedel/utils_go/pkg/http/mux/types/endpoint"
-	muxResponse "github.com/Motmedel/utils_go/pkg/http/mux/types/response"
-	muxResponseError "github.com/Motmedel/utils_go/pkg/http/mux/types/response_error"
+	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
+	"github.com/altshiftab/utils_go/pkg/http/mux"
+	muxEndpoint "github.com/altshiftab/utils_go/pkg/http/mux/types/endpoint"
+	muxResponse "github.com/altshiftab/utils_go/pkg/http/mux/types/response"
+	muxResponseError "github.com/altshiftab/utils_go/pkg/http/mux/types/response_error"
 )
 
 // DiagnosticsHandler returns an HTTP handler exposing the resolver's diagnostic
@@ -29,25 +29,25 @@ import (
 func (r *Resolver) DiagnosticsHandler() http.Handler {
 	return mux.New(
 		&muxEndpoint.Endpoint{
-			Path:               "/metrics",
-			Method:             http.MethodGet,
-			Public:             true,
-			DisableFetchMedata: true,
-			Handler:            r.handleMetrics,
+			Path:                 "/metrics",
+			Method:               http.MethodGet,
+			Public:               true,
+			DisableFetchMetadata: true,
+			Handler:              r.handleMetrics,
 		},
 		&muxEndpoint.Endpoint{
-			Path:               "/cache",
-			Method:             http.MethodGet,
-			Public:             true,
-			DisableFetchMedata: true,
-			Handler:            r.handleCacheGet,
+			Path:                 "/cache",
+			Method:               http.MethodGet,
+			Public:               true,
+			DisableFetchMetadata: true,
+			Handler:              r.handleCacheGet,
 		},
 		&muxEndpoint.Endpoint{
-			Path:               "/cache",
-			Method:             http.MethodDelete,
-			Public:             true,
-			DisableFetchMedata: true,
-			Handler:            r.handleCacheDelete,
+			Path:                 "/cache",
+			Method:               http.MethodDelete,
+			Public:               true,
+			DisableFetchMetadata: true,
+			Handler:              r.handleCacheDelete,
 		},
 	)
 }
@@ -56,7 +56,7 @@ func jsonResponse(status int, payload any) (*muxResponse.Response, *muxResponseE
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, &muxResponseError.ResponseError{
-			ServerError: motmedelErrors.New(fmt.Errorf("json marshal: %w", err), payload),
+			ServerError: altshiftErrors.New(fmt.Errorf("json marshal: %w", err), payload),
 		}
 	}
 
