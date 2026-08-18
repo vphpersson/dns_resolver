@@ -3,7 +3,7 @@ module dns_resolver
 go 1.26
 
 require (
-	github.com/Motmedel/dns_utils v0.0.56
+	github.com/Motmedel/dns_utils v0.0.57
 	github.com/Motmedel/dns_utils/pkg/quic v0.0.3
 	github.com/Motmedel/utils_go v0.0.483
 	github.com/Motmedel/utils_go/pkg/http/mux v0.0.186
