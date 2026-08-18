@@ -10,7 +10,6 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.59.0
-	github.com/vphpersson/argument_parser v0.0.4
 	golang.org/x/net v0.52.0
 	golang.org/x/sync v0.20.0
 )
@@ -18,6 +17,7 @@ require (
 require (
 	github.com/Motmedel/parsing_utils v0.0.6 // indirect
 	github.com/Motmedel/utils_go/pkg/http/parsing/headers v0.0.43 // indirect
+	github.com/altshiftab/utils_go v1.26.0
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/pandatix/go-abnf v0.4.2 // indirect
 	golang.org/x/crypto v0.49.0 // indirect

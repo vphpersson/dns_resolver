@@ -97,17 +97,15 @@ func (pool *Pool[T]) Get(ctx context.Context) (T, error) {
 
 	// Watchdog: if ctx is cancelled while we're waiting on the condition
 	// variable, broadcast so the Wait() unblocks and we can return ctx.Err().
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			pool.mutex.Lock()
-			pool.condition.Broadcast()
-			pool.mutex.Unlock()
-		case <-stop:
-		}
-	}()
+	// AfterFunc registers a listener rather than parking a goroutine, so an
+	// acquisition that never has to wait — the common case — costs neither a
+	// goroutine nor a channel.
+	stopWatchdog := context.AfterFunc(ctx, func() {
+		pool.mutex.Lock()
+		defer pool.mutex.Unlock()
+		pool.condition.Broadcast()
+	})
+	defer stopWatchdog()
 
 	for {
 		if pool.closed {

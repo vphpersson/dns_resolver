@@ -21,9 +21,10 @@ import (
 	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
 	motmedelLogHandler "github.com/Motmedel/utils_go/pkg/log/handler"
 	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
+	argumentParserPkg "github.com/altshiftab/utils_go/pkg/cli/argument_parser"
+	argumentParserErrors "github.com/altshiftab/utils_go/pkg/cli/argument_parser/errors"
+	"github.com/altshiftab/utils_go/pkg/cli/argument_parser/option"
 	"github.com/miekg/dns"
-	"github.com/vphpersson/argument_parser/pkg/argument_parser"
-	"github.com/vphpersson/argument_parser/pkg/types/option"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -34,6 +35,8 @@ var (
 	errInvalidBlocklist          = errors.New("invalid blocklist")
 	errDuplicateBlocklistName    = errors.New("duplicate blocklist name")
 )
+
+const programName = "dns_resolver"
 
 const (
 	diagnosticsReadHeaderTimeout = 5 * time.Second
@@ -101,7 +104,9 @@ func main() {
 	idleTimeoutString := resolver_config.DefaultIdleTimeout.String()
 	keepAliveIntervalString := resolver_config.DefaultKeepAliveInterval.String()
 
-	argumentParser := argument_parser.Parser{
+	parser := &argumentParserPkg.Parser{
+		ProgramName: programName,
+		Description: "Resolve DNS over an encrypted upstream, with caching, hosts and blocklists.",
 		Options: []option.Option{
 			option.NewStringOption('f', "forward", "forward address", true, &forwardAddress),
 			option.NewBoolOption('v', "verbose", "whether verbose", false, &verbose),
@@ -118,7 +123,19 @@ func main() {
 		},
 	}
 
-	if err := argumentParser.Parse(); err != nil {
+	if err := parser.Validate(); err != nil {
+		logger.FatalWithExitingMessage(
+			"An error occurred when validating the argument parser.",
+			motmedelErrors.NewWithTrace(fmt.Errorf("argument parser validate: %w", err)),
+		)
+	}
+
+	if err := parser.Parse(); err != nil {
+		// Help is an answer to an explicit request, not a failure.
+		if errors.Is(err, argumentParserErrors.ErrHelp) {
+			return
+		}
+
 		logger.FatalWithExitingMessage(
 			"An error occurred when parsing the arguments.",
 			motmedelErrors.NewWithTrace(fmt.Errorf("argument parser parse: %w", err)),
