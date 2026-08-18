@@ -198,13 +198,19 @@ type Metrics struct {
 }
 
 type Resolver struct {
-	ParentContext context.Context
-	ServerAddress string
-	ServerName    string
-	Cache         *cache.Cache
-	Mode          string
-	DotConfig     *DotConfig
-	Hosts         HostsResolver
+	// LifetimeContext bounds the resolver's life, and is the context its request
+	// handling derives from. It is held here rather than passed because
+	// dns.Handler's ServeDNS is handed no context at all, so there is no
+	// per-request context to prefer over it. Cancelling it is what lets an
+	// in-flight acquisition abandon a pool that is shutting down.
+	//nolint:containedctx // ServeDNS provides no context; see above.
+	LifetimeContext context.Context
+	ServerAddress   string
+	ServerName      string
+	Cache           *cache.Cache
+	Mode            string
+	DotConfig       *DotConfig
+	Hosts           HostsResolver
 	// MaintenanceInterval drives the upstream pool's keep-alive/eviction loop
 	// when started via StartConnectionMaintenance (DoT mode only).
 	MaintenanceInterval time.Duration
@@ -397,7 +403,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	if request == nil {
 		slog.WarnContext(
 			motmedelContext.WithError(
-				r.ParentContext,
+				r.LifetimeContext,
 				motmedelErrors.NewWithTrace(nil_error.New("request")),
 			),
 			"",
@@ -415,7 +421,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	if len(requestQuestions) == 0 {
 		slog.WarnContext(
 			motmedelContext.WithError(
-				r.ParentContext,
+				r.LifetimeContext,
 				motmedelErrors.NewWithTrace(dnsResolverErrors.ErrNoQuestions),
 			),
 			"",
@@ -433,7 +439,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	if remoteAddr == nil {
 		slog.WarnContext(
 			motmedelContext.WithError(
-				r.ParentContext,
+				r.LifetimeContext,
 				motmedelErrors.NewWithTrace(nil_error.New("remote address")),
 			),
 			"",
@@ -468,7 +474,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		if r.Hosts != nil {
 			if hostsResponse := r.Hosts.Resolve(request); hostsResponse != nil {
 				ctxWithDns := dnsUtilsContext.WithDnsContextValue(
-					r.ParentContext,
+					r.LifetimeContext,
 					&dnsUtilsTypes.DnsContext{
 						Time:            new(time.Now()),
 						ClientAddress:   remoteAddrString,
@@ -504,7 +510,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				blockedByAnyList = true
 
 				ctxWithDns := dnsUtilsContext.WithDnsContextValue(
-					r.ParentContext,
+					r.LifetimeContext,
 					&dnsUtilsTypes.DnsContext{
 						Time:            new(time.Now()),
 						ClientAddress:   remoteAddrString,
@@ -557,7 +563,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 		if response == nil {
 			var dnsContext dnsUtilsTypes.DnsContext
-			ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.ParentContext, &dnsContext))
+			ctxWithTlsDns := motmedelTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.LifetimeContext, &dnsContext))
 
 			var err error
 			switch r.Mode {
@@ -649,7 +655,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	if response == nil {
 		slog.ErrorContext(
 			motmedelContext.WithError(
-				r.ParentContext,
+				r.LifetimeContext,
 				motmedelErrors.NewWithTrace(nil_error.New("response")),
 			),
 			"",
@@ -688,7 +694,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	// Write the response.
 
 	ctxWithDns := dnsUtilsContext.WithDnsContextValue(
-		r.ParentContext,
+		r.LifetimeContext,
 		&dnsUtilsTypes.DnsContext{
 			Time:            new(time.Now()),
 			ClientAddress:   remoteAddr.String(),
@@ -778,11 +784,11 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 	config := resolver_config.New(options...)
 
 	resolver := Resolver{
-		ParentContext: ctx,
-		ServerAddress: serverAddress,
-		ServerName:    serverName,
-		Cache:         cache.New(),
-		Mode:          mode,
+		LifetimeContext: ctx,
+		ServerAddress:   serverAddress,
+		ServerName:      serverName,
+		Cache:           cache.New(),
+		Mode:            mode,
 	}
 
 	switch mode {

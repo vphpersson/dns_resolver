@@ -108,7 +108,7 @@ func (r *Resolver) logCacheControl(action string, name string, removed int) {
 		attrs = append(attrs, slog.String("name", name))
 	}
 	slog.WarnContext(
-		r.ParentContext,
+		r.LifetimeContext,
 		"",
 		makeEventGroup(
 			"cache_control",
