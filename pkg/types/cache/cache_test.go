@@ -31,6 +31,8 @@ func msgWithRcode(name string, rcode int) *dns.Msg {
 // upstream/transport hiccup into a sticky outage for the name. This is the
 // regression that wedged www.google.com on a cached SERVFAIL.
 func TestSet_DoesNotCacheFailureRcodes(t *testing.T) {
+	t.Parallel()
+
 	for _, rcode := range []int{dns.RcodeServerFailure, dns.RcodeRefused, dns.RcodeNotImplemented} {
 		c := New()
 		key := keyFor("www.google.com.")
@@ -44,6 +46,8 @@ func TestSet_DoesNotCacheFailureRcodes(t *testing.T) {
 }
 
 func TestSet_CachesPositiveAnswer(t *testing.T) {
+	t.Parallel()
+
 	c := New()
 	key := keyFor("example.com.")
 
@@ -69,6 +73,8 @@ func TestSet_CachesPositiveAnswer(t *testing.T) {
 // EffectiveMessageTtl; the cache must cap it rather than pin the name for ~136
 // years.
 func TestSet_CapsUnboundedTtl(t *testing.T) {
+	t.Parallel()
+
 	c := New()
 	key := keyFor("nope.example.")
 
@@ -85,6 +91,8 @@ func TestSet_CapsUnboundedTtl(t *testing.T) {
 }
 
 func TestFlush(t *testing.T) {
+	t.Parallel()
+
 	c := New()
 	c.Set(keyFor("a.example."), answerMsg("a.example.", 60), nil)
 	c.Set(keyFor("b.example."), answerMsg("b.example.", 60), nil)
@@ -100,6 +108,8 @@ func TestFlush(t *testing.T) {
 // DeleteName must remove every variant of one name (here A + AAAA) without
 // touching other names — the targeted "unpoison" control.
 func TestDeleteName(t *testing.T) {
+	t.Parallel()
+
 	c := New()
 	a := answerMsg("www.google.com.", 60)
 	aaaa := answerMsg("www.google.com.", 60)
@@ -120,6 +130,8 @@ func TestDeleteName(t *testing.T) {
 }
 
 func TestStats_HitsAndMisses(t *testing.T) {
+	t.Parallel()
+
 	c := New()
 	c.Set(keyFor("a.example."), answerMsg("a.example.", 60), nil)
 
@@ -137,6 +149,8 @@ func TestStats_HitsAndMisses(t *testing.T) {
 }
 
 func TestStats_RejectionCounted(t *testing.T) {
+	t.Parallel()
+
 	c := New()
 	if c.Set(keyFor("x."), msgWithRcode("x.", dns.RcodeServerFailure), nil) {
 		t.Fatal("SERVFAIL should not be cached")

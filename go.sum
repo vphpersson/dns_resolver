@@ -30,8 +30,6 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/vphpersson/argument_parser v0.0.4 h1:g/q/147M+3A7crOvXX+MmqY9t32A+igJ82XKmPCpUZA=
 github.com/vphpersson/argument_parser v0.0.4/go.mod h1:uEeMGcCEzMM7gqWOY8l40onpsGlTIDsaNEm5CAklitE=
-github.com/vphpersson/connection_pool v0.0.16 h1:qdj/5D6gHzZrrn3LjIjxRebO42mdB3qcFpR6kiTIWPU=
-github.com/vphpersson/connection_pool v0.0.16/go.mod h1:tPBqpf8fIbR+dlYsb8RaCK4Yk3eFIkiapIUSM4va22U=
 go.uber.org/mock v0.5.2 h1:LbtPTcP8A5k9WPXj54PPPbjcI4Y6lhyOZXn+VS7wNko=
 go.uber.org/mock v0.5.2/go.mod h1:wLlUxC2vVTPTaE3UD51E0BGOAElKrILxhVSDYQLld5o=
 golang.org/x/crypto v0.49.0 h1:+Ng2ULVvLHnJ/ZFEq4KdcDd/cfjrrjjNSXNzxg0Y4U4=

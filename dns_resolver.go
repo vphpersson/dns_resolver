@@ -27,6 +27,21 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Argument validation failures, wrapped with the offending value.
+var (
+	errInvalidMaxConnections     = errors.New("invalid max connections")
+	errInvalidMinWarmConnections = errors.New("invalid min warm connections")
+	errInvalidBlocklist          = errors.New("invalid blocklist")
+	errDuplicateBlocklistName    = errors.New("duplicate blocklist name")
+)
+
+const (
+	diagnosticsReadHeaderTimeout = 5 * time.Second
+	diagnosticsReadTimeout       = 15 * time.Second
+	diagnosticsWriteTimeout      = 30 * time.Second
+	diagnosticsIdleTimeout       = 60 * time.Second
+)
+
 func main() {
 	var logLevel slog.LevelVar
 
@@ -132,14 +147,14 @@ func main() {
 	if maxConnections < 1 {
 		logger.FatalWithExitingMessage(
 			"The max connections must be at least 1.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("invalid max connections: %d", maxConnections)),
+			motmedelErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxConnections, maxConnections)),
 		)
 	}
 
 	if minWarmConnections < 0 {
 		logger.FatalWithExitingMessage(
 			"The min warm connections cannot be negative.",
-			motmedelErrors.NewWithTrace(fmt.Errorf("invalid min warm connections: %d", minWarmConnections)),
+			motmedelErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMinWarmConnections, minWarmConnections)),
 		)
 	}
 
@@ -173,13 +188,13 @@ func main() {
 		if !ok || name == "" || path == "" {
 			logger.FatalWithExitingMessage(
 				"Malformed blocklist argument; expected NAME=PATH.",
-				motmedelErrors.NewWithTrace(fmt.Errorf("invalid blocklist: %q", arg)),
+				motmedelErrors.NewWithTrace(fmt.Errorf("%w: %q", errInvalidBlocklist, arg)),
 			)
 		}
 		if _, dup := seenBlocklistNames[name]; dup {
 			logger.FatalWithExitingMessage(
 				"Duplicate blocklist name.",
-				motmedelErrors.NewWithTrace(fmt.Errorf("duplicate blocklist name: %q", name)),
+				motmedelErrors.NewWithTrace(fmt.Errorf("%w: %q", errDuplicateBlocklistName, name)),
 			)
 		}
 		seenBlocklistNames[name] = struct{}{}
@@ -301,7 +316,16 @@ func main() {
 
 	if infoAddress != "" {
 		errGroup.Go(func() error {
-			server := &http.Server{Addr: infoAddress, Handler: dnsResolver.DiagnosticsHandler()}
+			server := &http.Server{
+				Addr:    infoAddress,
+				Handler: dnsResolver.DiagnosticsHandler(),
+				// A client must not be able to hold the diagnostics server open
+				// by trickling a request at it.
+				ReadHeaderTimeout: diagnosticsReadHeaderTimeout,
+				ReadTimeout:       diagnosticsReadTimeout,
+				WriteTimeout:      diagnosticsWriteTimeout,
+				IdleTimeout:       diagnosticsIdleTimeout,
+			}
 			// Shut the diagnostic server down when the group context ends so it
 			// does not keep the process alive after the DNS servers exit.
 			context.AfterFunc(errGroupCtx, func() { _ = server.Close() })

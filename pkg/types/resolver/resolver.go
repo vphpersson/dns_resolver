@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"dns_resolver/pkg/connection_pool"
 	dnsUtilsContext "github.com/Motmedel/dns_utils/pkg/context"
 	"github.com/Motmedel/dns_utils/pkg/dns_utils"
 	dnsUtilsErrors "github.com/Motmedel/dns_utils/pkg/errors"
@@ -32,7 +33,6 @@ import (
 	motmedelTlsContext "github.com/Motmedel/utils_go/pkg/tls/context"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
-	"github.com/vphpersson/connection_pool/pkg/connection_pool"
 )
 
 const (
