@@ -1,6 +1,6 @@
 module dns_resolver
 
-go 1.26
+go 1.27
 
 require (
 	github.com/Motmedel/dns_utils v0.0.58
