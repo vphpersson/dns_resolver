@@ -308,7 +308,7 @@ func main() {
 
 	if hostsFile != "" {
 		hostsResolver := hosts.New(hostsFile, 0)
-		if err := hostsResolver.Reload(); err != nil {
+		if err := hostsResolver.Reload(errGroupCtx); err != nil {
 			logger.FatalWithExitingMessage(
 				"An error occurred when loading the hosts file.",
 				fmt.Errorf("hosts reload: %w", err),

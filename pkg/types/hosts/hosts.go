@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -42,6 +43,51 @@ func (e *Entries) LookupAAAA(name string) []net.IP {
 		return nil
 	}
 	return e.v6[normalizeName(name)]
+}
+
+// LoopbackNames returns, sorted, the names mapped to a loopback address that
+// are not localhost. Because the hosts file is served to the whole network,
+// such a name sends every client back to itself, and the symptom -- a host
+// that answers DNS but is unreachable at the address it hands out -- reads as
+// a network fault rather than a configuration one. The stock "127.0.1.1
+// <hostname>" line does exactly this, so it is worth saying out loud.
+func (e *Entries) LoopbackNames() []string {
+	if e == nil {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	for _, addresses := range []map[string][]net.IP{e.v4, e.v6} {
+		for name, ips := range addresses {
+			if isLocalhostName(name) {
+				continue
+			}
+			for _, ip := range ips {
+				if ip.IsLoopback() {
+					seen[name] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// isLocalhostName reports whether name is one the RFC 6761 special-use rules
+// require to be a loopback address, and so is not worth warning about.
+func isLocalhostName(name string) bool {
+	return name == "localhost" ||
+		name == "localhost.localdomain" ||
+		strings.HasSuffix(name, ".localhost")
 }
 
 // Has reports whether name appears in the hosts file with an address of either
@@ -155,8 +201,10 @@ func (h *Hosts) Path() string {
 }
 
 // Reload reads and parses the hosts file and atomically swaps the active
-// entries on success.
-func (h *Hosts) Reload() error {
+// entries on success. Names that resolve to a loopback address are warned
+// about but not withheld: what the file says is what gets served, and the
+// point of the warning is that the file says something surprising.
+func (h *Hosts) Reload(ctx context.Context) error {
 	if h == nil {
 		return nil
 	}
@@ -165,6 +213,25 @@ func (h *Hosts) Reload() error {
 		return altshiftErrors.New(fmt.Errorf("load: %w", err), h.path)
 	}
 	h.entries.Store(entries)
+
+	if names := entries.LoopbackNames(); len(names) > 0 {
+		slog.WarnContext(
+			ctx,
+			"",
+			slog.Group(
+				"event",
+				slog.String("action", "hosts_reload"),
+				slog.String("reason", "A name in the hosts file maps to a loopback address. It is served to the whole network, where it directs every client back to itself."),
+				slog.String("kind", "event"),
+				slog.String("outcome", "success"),
+				slog.Any("category", []string{"file"}),
+				slog.Any("type", []string{"info"}),
+			),
+			slog.Group("file", slog.String("path", h.path)),
+			slog.Group("hosts", slog.Any("loopback_names", names)),
+		)
+	}
+
 	return nil
 }
 
@@ -312,7 +379,7 @@ func (h *Hosts) Watch(ctx context.Context) error {
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
 				continue
 			}
-			if err := h.Reload(); err != nil {
+			if err := h.Reload(ctx); err != nil {
 				logReloadError(err)
 			}
 		case err, ok := <-watcher.Errors:

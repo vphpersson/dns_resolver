@@ -272,6 +272,87 @@ func TestResolveNilReceiverAndEmptyQuestion(t *testing.T) {
 	}
 }
 
+// TestLoopbackNames covers the check behind the reload warning. The case that
+// matters is the stock "127.0.1.1 <hostname>" line: harmless on a workstation,
+// but this hosts file is served to the whole network, so it tells every client
+// that the router is themselves.
+func TestLoopbackNames(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name  string
+		hosts string
+		want  []string
+	}{
+		{
+			name:  "the stock local hostname line is reported",
+			hosts: "127.0.1.1 glory\n192.168.1.1 dns.home.arpa\n",
+			want:  []string{"glory"},
+		},
+		{
+			name:  "localhost itself is exempt",
+			hosts: "127.0.0.1 localhost\n::1 localhost\n",
+			want:  nil,
+		},
+		{
+			name:  "the localhost special-use names are exempt",
+			hosts: "127.0.0.1 localhost localhost.localdomain foo.localhost\n",
+			want:  nil,
+		},
+		{
+			name:  "an IPv6 loopback is reported too",
+			hosts: "::1 glory\n",
+			want:  []string{"glory"},
+		},
+		{
+			name:  "every alias on the line is reported, sorted",
+			hosts: "127.0.1.1 zeta alpha\n",
+			want:  []string{"alpha", "zeta"},
+		},
+		{
+			name:  "a name reported once even with both families",
+			hosts: "127.0.1.1 glory\n::1 glory\n",
+			want:  []string{"glory"},
+		},
+		{
+			name:  "routable addresses are not reported",
+			hosts: "192.168.1.1 glory\n10.5.2.2 clamps\n",
+			want:  nil,
+		},
+		{
+			name:  "a name with both a loopback and a routable address is still reported",
+			hosts: "127.0.1.1 glory\n192.168.1.1 glory\n",
+			want:  []string{"glory"},
+		},
+		{
+			name:  "an empty file reports nothing",
+			hosts: "",
+			want:  nil,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			entries, err := ParseReader(strings.NewReader(testCase.hosts))
+			if err != nil {
+				t.Fatalf("%s: ParseReader: %v", testCase.name, err)
+			}
+			got := entries.LoopbackNames()
+			if len(got) != len(testCase.want) {
+				t.Fatalf("%s: got %v, want %v", testCase.name, got, testCase.want)
+			}
+			for i := range got {
+				if got[i] != testCase.want[i] {
+					t.Errorf("%s: got %v, want %v", testCase.name, got, testCase.want)
+					break
+				}
+			}
+		})
+	}
+}
+
 func TestEntriesNilReceiver(t *testing.T) {
 	t.Parallel()
 
@@ -284,5 +365,8 @@ func TestEntriesNilReceiver(t *testing.T) {
 	}
 	if entries.Has("glory") {
 		t.Error("Has on a nil Entries should return false")
+	}
+	if entries.LoopbackNames() != nil {
+		t.Error("LoopbackNames on a nil Entries should return nil")
 	}
 }
