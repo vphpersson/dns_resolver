@@ -44,6 +44,20 @@ func (e *Entries) LookupAAAA(name string) []net.IP {
 	return e.v6[normalizeName(name)]
 }
 
+// Has reports whether name appears in the hosts file with an address of either
+// family.
+func (e *Entries) Has(name string) bool {
+	if e == nil {
+		return false
+	}
+	normalized := normalizeName(name)
+	if _, ok := e.v4[normalized]; ok {
+		return true
+	}
+	_, ok := e.v6[normalized]
+	return ok
+}
+
 // normalizeName lowercases a DNS name and strips any trailing dot so it can
 // be compared against the hostnames parsed out of a hosts file.
 func normalizeName(name string) string {
@@ -164,8 +178,10 @@ func (h *Hosts) Entries() *Entries {
 }
 
 // Resolve attempts to answer request from the hosts file. It returns nil when
-// there is no matching entry (in which case the caller should fall through to
-// the upstream resolver). Only A and AAAA queries in class IN are considered.
+// the name is absent from the file, in which case the caller should fall
+// through to the upstream resolver. A name that is present is answered
+// authoritatively whatever the type: with records for A and AAAA where the
+// file holds them, and NODATA otherwise. Only class IN is considered.
 func (h *Hosts) Resolve(request *dns.Msg) *dns.Msg {
 	if h == nil || request == nil {
 		return nil
@@ -181,6 +197,18 @@ func (h *Hosts) Resolve(request *dns.Msg) *dns.Msg {
 
 	entries := h.entries.Load()
 	if entries == nil {
+		return nil
+	}
+
+	// A name the hosts file knows is answered here for every type, including
+	// the types it holds no record for. Falling through instead would forward
+	// the query, and a name that exists only in this file comes back NXDOMAIN
+	// -- which says the name does not exist at all, rather than that it has no
+	// record of the type asked for. glibc resolves a hostname by asking for A
+	// and AAAA together and fails the lookup outright on that NXDOMAIN, so an
+	// IPv4-only entry would not resolve at all through getent, nss or anything
+	// built on them, while a direct A query answered correctly.
+	if !entries.Has(question.Name) {
 		return nil
 	}
 
@@ -210,14 +238,10 @@ func (h *Hosts) Resolve(request *dns.Msg) *dns.Msg {
 				AAAA: ip,
 			})
 		}
-	default:
-		return nil
 	}
 
-	if len(answers) == 0 {
-		return nil
-	}
-
+	// An empty answer section is deliberate: NOERROR with no records is NODATA,
+	// the correct way to say the name exists but holds nothing of this type.
 	response := new(dns.Msg)
 	response.SetReply(request)
 	response.Authoritative = true
