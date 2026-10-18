@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/Motmedel/dns_utils v0.0.58
 	github.com/Motmedel/dns_utils/pkg/quic v0.0.4
-	github.com/altshiftab/utils_go v1.26.0
+	github.com/altshiftab/utils_go v1.83.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.59.0

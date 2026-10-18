@@ -131,8 +131,9 @@ func main() {
 	}
 
 	if err := parser.Parse(); err != nil {
-		// Help is an answer to an explicit request, not a failure.
-		if errors.Is(err, argumentParserErrors.ErrHelp) {
+		// Help and a completion script are answers to an explicit request, not
+		// failures; both have already been written to stdout.
+		if errors.Is(err, argumentParserErrors.ErrHelp) || errors.Is(err, argumentParserErrors.ErrCompletion) {
 			return
 		}
 
