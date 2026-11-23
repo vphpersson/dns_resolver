@@ -499,6 +499,7 @@ func (r *Resolver) exchangeDot(
 	// What a failed exchange read is not an answer, so the response is taken
 	// only once the exchange has succeeded.
 	exchanged, err := dns_utils.ExchangeWithConn(ctx, request, client, connection)
+	trimLoggedMessages(ctx)
 	if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
 		// An rcode is the upstream's answer, not a fault of the connection.
 		err = checkAnswer(request, exchanged)
@@ -796,8 +797,8 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 					ClientAddress:   remoteAddrString,
 					ServerAddress:   dnsResolverServerAddress,
 					Transport:       transportProtocol,
-					QuestionMessage: request,
-					AnswerMessage:   hostsResponse,
+					QuestionMessage: loggable(request),
+					AnswerMessage:   loggable(hostsResponse),
 				},
 			)
 
@@ -831,8 +832,8 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						ClientAddress:   remoteAddrString,
 						ServerAddress:   dnsResolverServerAddress,
 						Transport:       transportProtocol,
-						QuestionMessage: request,
-						AnswerMessage:   localResponse,
+						QuestionMessage: loggable(request),
+						AnswerMessage:   loggable(localResponse),
 					},
 				),
 				"",
@@ -858,7 +859,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						ClientAddress:   remoteAddrString,
 						ServerAddress:   dnsResolverServerAddress,
 						Transport:       transportProtocol,
-						QuestionMessage: request,
+						QuestionMessage: loggable(request),
 					},
 				),
 				blocklist,
@@ -908,6 +909,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 		var err error
 		response, err = r.forward(ctxWithTlsDns, query)
+		trimLoggedMessages(ctxWithTlsDns)
 
 		if err != nil {
 			slog.ErrorContext(
@@ -985,7 +987,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						ClientAddress:   remoteAddrString,
 						ServerAddress:   dnsResolverServerAddress,
 						Transport:       transportProtocol,
-						QuestionMessage: request,
+						QuestionMessage: loggable(request),
 					},
 				),
 				blocklist,
@@ -1040,8 +1042,8 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 			ClientAddress:   remoteAddr.String(),
 			ServerAddress:   dnsResolverServerAddress,
 			Transport:       transportProtocol,
-			QuestionMessage: request,
-			AnswerMessage:   response,
+			QuestionMessage: loggable(request),
+			AnswerMessage:   loggable(response),
 		},
 	)
 
@@ -1049,7 +1051,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		slog.ErrorContext(
 			altshiftContext.WithError(
 				ctxWithDns,
-				altshiftErrors.New(fmt.Errorf("response writer write msg: %w", err), response),
+				altshiftErrors.New(fmt.Errorf("response writer write msg: %w", err), response.Question),
 			),
 			"",
 			makeEventGroup(
