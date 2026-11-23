@@ -71,6 +71,13 @@ func TestSet_CachesPositiveAnswer(t *testing.T) {
 	}
 }
 
+func cname(name string, target string, ttl uint32) *dns.CNAME {
+	return &dns.CNAME{
+		Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: ttl},
+		Target: target,
+	}
+}
+
 func soa(zone string, ttl uint32, minimum uint32) *dns.SOA {
 	return &dns.SOA{
 		Hdr:    dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: ttl},
@@ -131,6 +138,38 @@ func TestSet_NegativeAnswers(t *testing.T) {
 			},
 			wantCached: true,
 			wantMaxTtl: maxNegativeTtl,
+		},
+		{
+			// NODATA for an alias: the chain, and nothing of the type asked
+			// for. It is as negative as an empty answer section.
+			name: "nodata behind a cname with a day-long soa",
+			message: func() *dns.Msg {
+				m := msgWithRcode("nope.example.", dns.RcodeSuccess)
+				m.Answer = []dns.RR{cname("nope.example.", "target.example.", 86400)}
+				m.Ns = []dns.RR{soa("example.", 86400, 86400)}
+				return m
+			},
+			wantCached: true,
+			wantMaxTtl: maxNegativeTtl,
+		},
+		{
+			name: "nodata behind a cname without soa",
+			message: func() *dns.Msg {
+				m := msgWithRcode("nope.example.", dns.RcodeSuccess)
+				m.Answer = []dns.RR{cname("nope.example.", "target.example.", 86400)}
+				return m
+			},
+		},
+		{
+			name: "an answer through a cname",
+			message: func() *dns.Msg {
+				m := answerMsg("target.example.", 86400)
+				m.Question[0].Name = "nope.example."
+				m.Answer = append([]dns.RR{cname("nope.example.", "target.example.", 86400)}, m.Answer...)
+				return m
+			},
+			wantCached: true,
+			wantMaxTtl: maxCacheTtl,
 		},
 		{
 			name:       "answer with an unbounded ttl",

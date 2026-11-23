@@ -553,6 +553,7 @@ func (r *Resolver) exchangeOnConnection(
 	}
 
 	r.metrics.exchangeErrors.Add(1)
+	forgetRejectedAnswer(ctx)
 
 	if !altshiftErrors.IsClosedError(err) {
 		slog.WarnContext(

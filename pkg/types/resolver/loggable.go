@@ -35,7 +35,7 @@ func loggable(message *dns.Msg) *dns.Msg {
 		if needsTrim {
 			break
 		}
-		needsTrim = record != nil && dns.Len(record) > maxLoggedRecordData
+		needsTrim = record != nil && recordDataLength(record) > maxLoggedRecordData
 	}
 	if !needsTrim {
 		return message
@@ -52,10 +52,17 @@ func loggable(message *dns.Msg) *dns.Msg {
 	return &trimmed
 }
 
+// recordDataLength is the length of record's data alone: dns.Len counts the
+// owner name and the fixed header too, which would have an ordinary address
+// under a long name cut as if its data were long.
+func recordDataLength(record dns.RR) int {
+	return dns.Len(record) - dns.Len(&dns.RFC3597{Hdr: *record.Header()})
+}
+
 // loggableRecord returns record, or a stand-in of the same type and owner
 // whose data is no longer than maxLoggedRecordData.
 func loggableRecord(record dns.RR) dns.RR {
-	if dns.Len(record) <= maxLoggedRecordData {
+	if recordDataLength(record) <= maxLoggedRecordData {
 		return record
 	}
 
@@ -94,4 +101,14 @@ func trimLoggedMessages(ctx context.Context) {
 	}
 	dnsContext.QuestionMessage = loggable(dnsContext.QuestionMessage)
 	dnsContext.AnswerMessage = loggable(dnsContext.AnswerMessage)
+}
+
+// forgetRejectedAnswer drops a reply that was read but refused from what is
+// logged. The log takes the answer, when there is one, for the event's
+// message, so a reply refused for its id or question would otherwise be
+// logged as what was answered.
+func forgetRejectedAnswer(ctx context.Context) {
+	if dnsContext, ok := ctx.Value(dnsUtilsContext.DnsContextKey).(*dnsUtilsTypes.DnsContext); ok && dnsContext != nil {
+		dnsContext.AnswerMessage = nil
+	}
 }

@@ -125,8 +125,49 @@ func TestServeDNS_LogSize(t *testing.T) {
 	}
 }
 
+// A reply refused for its question is not logged as what was answered: the
+// log would otherwise show the refused address as the event's answer.
+//nolint:paralleltest // It swaps the default logger.
+func TestServeDNS_RejectedAnswerNotLogged(t *testing.T) {
+	sink := &lockedBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(productionLogger(sink))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	const refused = "198.51.100.66"
+	upstream := startUpstream(t, func(query *dns.Msg) *dns.Msg {
+		response := new(dns.Msg)
+		response.SetReply(query)
+		response.Question[0].Name = "poison.example."
+		response.Answer = []dns.RR{&dns.A{
+			Hdr: dns.RR_Header{Name: "poison.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP(refused).To4(),
+		}}
+		return response
+	})
+	resolver := newTestResolver(t, upstream)
+
+	reply, _ := askWire(resolver, "tcp", newQuery("victim.example.", dns.TypeA))
+	if reply == nil || reply.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %s; want SERVFAIL", rcodeOf(reply))
+	}
+
+	lines := sink.lines()
+	if len(lines) == 0 {
+		t.Fatal("nothing was logged")
+	}
+	for _, line := range lines {
+		if strings.Contains(line, refused) {
+			t.Errorf("the refused reply was logged: %.300s", line)
+		}
+	}
+}
+
 func TestLoggable(t *testing.T) {
 	t.Parallel()
+
+	// Four labels of 60 bytes: 244 bytes on the wire, near the 255 allowed.
+	longName := strings.Repeat(strings.Repeat("a", 60)+".", 4)
 
 	txt := func(size int) *dns.TXT {
 		return &dns.TXT{
@@ -154,6 +195,17 @@ func TestLoggable(t *testing.T) {
 		{name: "small", answer: append(addresses(2), txt(100)), wantSame: true, wantRecords: 3},
 		{name: "many records", answer: addresses(100), wantRecords: maxLoggedRecords},
 		{name: "long text", answer: []dns.RR{txt(5000)}, wantRecords: 1},
+		{
+			// The owner counts for nothing: an address under a name near the
+			// longest allowed is still logged as it is.
+			name: "address under a long name",
+			answer: []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: longName, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.IPv4(192, 0, 2, 1).To4(),
+			}},
+			wantSame:    true,
+			wantRecords: 1,
+		},
 		{
 			name: "long other record",
 			answer: []dns.RR{&dns.OPENPGPKEY{
@@ -184,10 +236,10 @@ func TestLoggable(t *testing.T) {
 				t.Fatalf("logged %d answers; want %d", len(got.Answer), testCase.wantRecords)
 			}
 			for i, record := range got.Answer {
-				if length := dns.Len(record); length > maxLoggedRecordData+64 {
+				if length := recordDataLength(record); length > maxLoggedRecordData+64 {
 					t.Fatalf("a logged record is %d bytes; want about %d at most", length, maxLoggedRecordData)
 				}
-				if record.Header().Rrtype != testCase.answer[i].Header().Rrtype || record.Header().Name != "a.example." {
+				if record.Header().Rrtype != testCase.answer[i].Header().Rrtype || record.Header().Name != testCase.answer[i].Header().Name {
 					t.Fatalf("logged record %v lost its type or owner", record)
 				}
 			}

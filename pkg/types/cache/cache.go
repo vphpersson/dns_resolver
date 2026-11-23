@@ -268,9 +268,24 @@ func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) b
 }
 
 // isNegative reports whether message says the name does not exist (NXDOMAIN)
-// or has no records of the type asked for (NODATA).
+// or has no records of the type asked for (NODATA). A NODATA answer for a name
+// that is an alias carries the CNAME chain and nothing of the type asked for
+// (RFC 2308 §2.2.1), so the type, not an empty answer section, decides.
 func isNegative(message *dns.Msg) bool {
-	return message.Rcode == dns.RcodeNameError || len(message.Answer) == 0
+	if message.Rcode == dns.RcodeNameError {
+		return true
+	}
+	if len(message.Question) == 0 {
+		return len(message.Answer) == 0
+	}
+
+	asked := message.Question[0].Qtype
+	for _, record := range message.Answer {
+		if record != nil && (asked == dns.TypeANY || record.Header().Rrtype == asked) {
+			return false
+		}
+	}
+	return true
 }
 
 func hasSoa(records []dns.RR) bool {
