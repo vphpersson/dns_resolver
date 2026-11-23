@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	dnsResolverErrors "dns_resolver/pkg/errors"
 	"dns_resolver/pkg/types/cache"
+	"dns_resolver/pkg/types/local_zone"
 	"dns_resolver/pkg/types/resolver_config"
 	"errors"
 	"fmt"
@@ -292,6 +293,7 @@ type resolverMetrics struct {
 	responseOther    atomic.Uint64
 	blocked          atomic.Uint64
 	hostsAnswered    atomic.Uint64
+	localAnswered    atomic.Uint64
 	upstreamErrors   atomic.Uint64
 	exchangeErrors   atomic.Uint64
 	overloadRejected atomic.Uint64
@@ -307,6 +309,7 @@ type Metrics struct {
 	ResponseOther    uint64      `json:"response_other"`
 	Blocked          uint64      `json:"blocked"`
 	HostsAnswered    uint64      `json:"hosts_answered"`
+	LocalAnswered    uint64      `json:"local_answered"`
 	UpstreamErrors   uint64      `json:"upstream_errors"`
 	ExchangeErrors   uint64      `json:"exchange_errors"`
 	OverloadRejected uint64      `json:"overload_rejected"`
@@ -350,6 +353,7 @@ func (r *Resolver) Metrics() Metrics {
 		ResponseOther:    r.metrics.responseOther.Load(),
 		Blocked:          r.metrics.blocked.Load(),
 		HostsAnswered:    r.metrics.hostsAnswered.Load(),
+		LocalAnswered:    r.metrics.localAnswered.Load(),
 		UpstreamErrors:   r.metrics.upstreamErrors.Load(),
 		ExchangeErrors:   r.metrics.exchangeErrors.Load(),
 		OverloadRejected: r.metrics.overloadRejected.Load(),
@@ -807,6 +811,37 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 			r.metrics.hostsAnswered.Add(1)
 			response = hostsResponse
+		}
+	}
+
+	// A special-use name, or the reverse of a private address, is answered
+	// here: the upstream could only say it does not exist, and asking it
+	// would tell it a LAN host's name or address.
+	if response == nil && question.Qclass == dns.ClassINET {
+		if zone, ok := local_zone.Match(question.Name, question.Qtype); ok {
+			localResponse := local_zone.Response(request, zone)
+			slog.InfoContext(
+				dnsUtilsContext.WithDnsContextValue(
+					r.LifetimeContext,
+					&dnsUtilsTypes.DnsContext{
+						Time:            new(time.Now()),
+						ClientAddress:   remoteAddrString,
+						ServerAddress:   dnsResolverServerAddress,
+						Transport:       transportProtocol,
+						QuestionMessage: request,
+						AnswerMessage:   localResponse,
+					},
+				),
+				"",
+				makeEventGroup(
+					"dns_request_local",
+					"A request for a special-use or private name was answered locally.",
+					"success",
+					"connection", "protocol", "info",
+				),
+			)
+			r.metrics.localAnswered.Add(1)
+			response = localResponse
 		}
 	}
 
