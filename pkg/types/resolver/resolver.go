@@ -343,12 +343,17 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 				connectionPool.Put(ctx, connection, err)
 			}()
 
-			response, err = dns_utils.ExchangeWithConn(ctx, request, client, connection)
+			// What a failed exchange read is not an answer, so the response
+			// is taken only once the exchange has succeeded.
+			exchanged, err := dns_utils.ExchangeWithConn(ctx, request, client, connection)
 			if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
 				// An rcode is the upstream's answer, not a fault of the
 				// connection, which the deferred Put returns to the pool.
-				err = nil
-				return true, nil
+				err = checkAnswer(request, exchanged)
+				if err == nil {
+					response = exchanged
+					return true, nil
+				}
 			}
 
 			r.metrics.exchangeErrors.Add(1)
@@ -376,7 +381,42 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 		}
 	}
 
+	if response == nil {
+		return nil, altshiftErrors.NewWithTrace(dnsResolverErrors.ErrNoAnswer)
+	}
+
 	return response, nil
+}
+
+// checkAnswer reports whether response answers query: the question the
+// upstream answered must be the one it was asked. A reply without a question
+// section is accepted only for an rcode that is never cached, since some
+// servers leave it out of an error.
+func checkAnswer(query *dns.Msg, response *dns.Msg) error {
+	if response == nil {
+		return nil_error.New("response")
+	}
+	if len(query.Question) == 0 {
+		return altshiftErrors.NewWithTrace(dnsResolverErrors.ErrNoQuestions)
+	}
+
+	if len(response.Question) == 0 {
+		switch response.Rcode {
+		case dns.RcodeSuccess, dns.RcodeNameError:
+			return altshiftErrors.NewWithTrace(dnsResolverErrors.ErrAnswerMismatch, response.Rcode)
+		}
+		return nil
+	}
+
+	asked, answered := query.Question[0], response.Question[0]
+	if len(response.Question) != 1 ||
+		!strings.EqualFold(asked.Name, answered.Name) ||
+		asked.Qtype != answered.Qtype ||
+		asked.Qclass != answered.Qclass {
+		return altshiftErrors.NewWithTrace(dnsResolverErrors.ErrAnswerMismatch, asked, answered)
+	}
+
+	return nil
 }
 
 func (r *Resolver) handleDoq(ctx context.Context, request *dns.Msg) (*dns.Msg, error) {
