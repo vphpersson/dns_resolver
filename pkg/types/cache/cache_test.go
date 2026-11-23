@@ -69,24 +69,81 @@ func TestSet_CachesPositiveAnswer(t *testing.T) {
 	}
 }
 
-// An NXDOMAIN/NODATA with no SOA yields the uint32-max sentinel TTL from
-// EffectiveMessageTtl; the cache must cap it rather than pin the name for ~136
-// years.
-func TestSet_CapsUnboundedTtl(t *testing.T) {
+func soa(zone string, ttl uint32, minimum uint32) *dns.SOA {
+	return &dns.SOA{
+		Hdr:    dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: ttl},
+		Ns:     "ns." + zone,
+		Mbox:   "hostmaster." + zone,
+		Minttl: minimum,
+	}
+}
+
+// A negative answer is cached for as long as its SOA allows, and one without an
+// SOA is not cached at all: it used to take the 24h cap, so an upstream's
+// empty answer to a query it did not recurse for stuck for a day.
+func TestSet_NegativeAnswers(t *testing.T) {
 	t.Parallel()
 
-	c := New()
-	key := keyFor("nope.example.")
+	testCases := []struct {
+		name       string
+		message    func() *dns.Msg
+		wantCached bool
+		wantMaxTtl time.Duration
+	}{
+		{
+			name:    "nxdomain without soa",
+			message: func() *dns.Msg { return msgWithRcode("nope.example.", dns.RcodeNameError) },
+		},
+		{
+			name:    "nodata without soa",
+			message: func() *dns.Msg { return msgWithRcode("nope.example.", dns.RcodeSuccess) },
+		},
+		{
+			name: "nxdomain with soa",
+			message: func() *dns.Msg {
+				m := msgWithRcode("nope.example.", dns.RcodeNameError)
+				m.Ns = []dns.RR{soa("example.", 300, 60)}
+				return m
+			},
+			wantCached: true,
+			wantMaxTtl: 60 * time.Second,
+		},
+		{
+			name: "nodata with soa",
+			message: func() *dns.Msg {
+				m := msgWithRcode("nope.example.", dns.RcodeSuccess)
+				m.Ns = []dns.RR{soa("example.", 120, 3600)}
+				return m
+			},
+			wantCached: true,
+			wantMaxTtl: 120 * time.Second,
+		},
+		{
+			name:       "answer with an unbounded ttl",
+			message:    func() *dns.Msg { return answerMsg("forever.example.", ^uint32(0)) },
+			wantCached: true,
+			wantMaxTtl: maxCacheTtl,
+		},
+	}
 
-	if !c.Set(key, msgWithRcode("nope.example.", dns.RcodeNameError), nil) {
-		t.Fatal("Set rejected an NXDOMAIN response; want it cached (capped)")
-	}
-	_, ok, remaining := c.Get(key)
-	if !ok {
-		t.Fatal("NXDOMAIN response not retrievable from cache")
-	}
-	if remaining > maxCacheTtl {
-		t.Fatalf("remaining TTL = %s; want <= %s", remaining, maxCacheTtl)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := New()
+			key := keyFor("nope.example.")
+
+			if got := c.Set(key, testCase.message(), nil); got != testCase.wantCached {
+				t.Fatalf("Set = %t; want %t", got, testCase.wantCached)
+			}
+			_, ok, remaining := c.Get(key)
+			if ok != testCase.wantCached {
+				t.Fatalf("Get found = %t; want %t", ok, testCase.wantCached)
+			}
+			if ok && (remaining <= 0 || remaining > testCase.wantMaxTtl) {
+				t.Fatalf("remaining TTL = %s; want (0, %s]", remaining, testCase.wantMaxTtl)
+			}
+		})
 	}
 }
 

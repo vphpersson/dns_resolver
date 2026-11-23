@@ -104,16 +104,12 @@ func makeBlockedResponse(request *dns.Msg) *dns.Msg {
 			},
 			Ns:      "ns.block.local.",
 			Mbox:    "hostmaster.block.local.",
-			Serial:  uint32(time.Now().Unix()),
+			Serial:  1,
 			Refresh: 3600,
 			Retry:   600,
 			Expire:  86400,
 			Minttl:  3600,
 		},
-	}
-
-	if opt := request.IsEdns0(); opt != nil {
-		response.SetEdns0(opt.UDPSize(), opt.Do())
 	}
 
 	return response
@@ -126,13 +122,117 @@ func requestDO(msg *dns.Msg) bool {
 	return false
 }
 
-func getCacheKey(q dns.Question, do bool) cache.Key {
+// getCacheKey names what an answer depends on. Everything that varies the
+// upstream query, which newUpstreamQuery builds from these and nothing else,
+// is part of it.
+func getCacheKey(q dns.Question, do bool, cd bool) cache.Key {
 	return cache.Key{
 		Name:   strings.ToLower(q.Name),
 		Qtype:  q.Qtype,
 		Qclass: q.Qclass,
 		DO:     do,
+		CD:     cd,
 	}
+}
+
+// upstreamUDPSize is the EDNS payload size advertised upstream. The upstream is
+// reached over a stream, so it bounds nothing; RFC 9715's 1232 is a safe value
+// to state.
+const upstreamUDPSize = 1232
+
+// newUpstreamQuery builds the query sent upstream for a client's question. It
+// is the resolver's own: the client's ID, header bits, EDNS options and other
+// sections are not forwarded, since the answer is cached for every client and
+// may only depend on what the cache key holds. RD is always set, as an answer
+// to a query without it is whatever the upstream happens to have cached. AD is
+// set so the upstream reports whether it validated the answer (RFC 6840 §5.7).
+func newUpstreamQuery(question dns.Question, do bool, cd bool) *dns.Msg {
+	query := new(dns.Msg)
+	query.Id = dns.Id()
+	query.Opcode = dns.OpcodeQuery
+	query.RecursionDesired = true
+	query.AuthenticatedData = true
+	query.CheckingDisabled = cd
+	query.Question = []dns.Question{{
+		Name:   strings.ToLower(question.Name),
+		Qtype:  question.Qtype,
+		Qclass: question.Qclass,
+	}}
+	query.SetEdns0(upstreamUDPSize, do)
+	return query
+}
+
+// replyUDPSize is the EDNS payload size the resolver advertises in a reply.
+func replyUDPSize(request *dns.Msg) uint16 {
+	if opt := request.IsEdns0(); opt != nil && opt.UDPSize() > dns.MinMsgSize {
+		return opt.UDPSize()
+	}
+	return dns.MinMsgSize
+}
+
+// setReplyEdns gives reply the OPT record the asker is owed: one when the
+// request carried one (RFC 6891 §6.1.1), describing this resolver rather than
+// whoever answered it, and none otherwise.
+func setReplyEdns(reply *dns.Msg, request *dns.Msg) {
+	if opt := request.IsEdns0(); opt != nil {
+		reply.SetEdns0(replyUDPSize(request), opt.Do())
+		return
+	}
+	// Without an OPT record an extended rcode cannot be expressed at all.
+	if reply.Rcode > 0xF {
+		reply.Rcode = dns.RcodeServerFailure
+	}
+}
+
+// copyRecords deep-copies records, leaving out OPT, which belongs to whoever
+// sent the message. A record owned by the queried name takes the asker's
+// spelling of it, so the reply reads as an answer to the question it carries.
+func copyRecords(records []dns.RR, askedName string) []dns.RR {
+	if len(records) == 0 {
+		return nil
+	}
+	copied := make([]dns.RR, 0, len(records))
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if _, ok := record.(*dns.OPT); ok {
+			continue
+		}
+		record = dns.Copy(record)
+		if header := record.Header(); askedName != "" && strings.EqualFold(header.Name, askedName) {
+			header.Name = askedName
+		}
+		copied = append(copied, record)
+	}
+	return copied
+}
+
+// buildReply makes the reply to request from answer, which may come from the
+// cache, the upstream, the hosts file or a blocklist and is left unmodified.
+// The reply carries the asker's own ID, opcode, RD and CD bits and question,
+// and an OPT record of the resolver's; of answer it takes the rcode, the
+// records and the AA, TC and AD bits. AD is kept only for an asker that said
+// it understands it, by setting AD or DO (RFC 6840 §5.8).
+func buildReply(request *dns.Msg, answer *dns.Msg) *dns.Msg {
+	reply := new(dns.Msg)
+	reply.SetRcode(request, answer.Rcode)
+	reply.Authoritative = answer.Authoritative
+	reply.Truncated = answer.Truncated
+	reply.RecursionAvailable = true
+	reply.AuthenticatedData = answer.AuthenticatedData && (request.AuthenticatedData || requestDO(request))
+
+	var askedName string
+	if len(request.Question) > 0 {
+		askedName = request.Question[0].Name
+	}
+	reply.Answer = copyRecords(answer.Answer, askedName)
+	reply.Ns = copyRecords(answer.Ns, "")
+	reply.Extra = copyRecords(answer.Extra, "")
+
+	setReplyEdns(reply, request)
+
+	return reply
 }
 
 func writeErrorResponse(responseWriter dns.ResponseWriter, request *dns.Msg, rcode int) {
@@ -141,9 +241,8 @@ func writeErrorResponse(responseWriter dns.ResponseWriter, request *dns.Msg, rco
 	}
 	response := new(dns.Msg)
 	response.SetRcode(request, rcode)
-	if opt := request.IsEdns0(); opt != nil {
-		response.SetEdns0(opt.UDPSize(), opt.Do())
-	}
+	response.RecursionAvailable = true
+	setReplyEdns(response, request)
 	_ = responseWriter.WriteMsg(response)
 }
 
@@ -528,6 +627,26 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	r.metrics.queriesTotal.Add(1)
 
+	// Only a standard query is answered. Anything else -- a NOTIFY, an
+	// UPDATE -- would otherwise be forwarded, and its reply cached as the
+	// answer to an ordinary query for the same name.
+	if request.Opcode != dns.OpcodeQuery {
+		slog.WarnContext(
+			r.LifetimeContext,
+			"",
+			makeEventGroup(
+				"dns_request_validate",
+				"The request's opcode is not supported.",
+				"failure",
+				"protocol", "denied",
+			),
+			slog.Group("dns", slog.String("op_code", dns.OpcodeToString[request.Opcode])),
+		)
+		r.metrics.responseOther.Add(1)
+		writeErrorResponse(responseWriter, request, dns.RcodeNotImplemented)
+		return
+	}
+
 	requestTimeout := r.RequestTimeout
 	if requestTimeout <= 0 {
 		requestTimeout = resolver_config.DefaultRequestTimeout
@@ -537,7 +656,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	var response *dns.Msg
 	do := requestDO(request)
-	cacheKey := getCacheKey(question, do)
+	cacheKey := getCacheKey(question, do, request.CheckingDisabled)
 	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
 	if !cacheHit || response == nil {
 		if r.Hosts != nil {
@@ -634,12 +753,16 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 			var dnsContext dnsUtilsTypes.DnsContext
 			ctxWithTlsDns := altshiftTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(requestCtx, &dnsContext))
 
+			query := newUpstreamQuery(question, do, request.CheckingDisabled)
+
 			var err error
 			switch r.Mode {
 			case "dot":
-				response, err = r.handleDot(ctxWithTlsDns, request)
+				response, err = r.handleDot(ctxWithTlsDns, query)
 			case "doq":
-				response, err = r.handleDoq(ctxWithTlsDns, request)
+				// RFC 9250 §4.2.1: a DoQ query's ID is zero.
+				query.Id = 0
+				response, err = r.handleDoq(ctxWithTlsDns, query)
 			default:
 				slog.ErrorContext(
 					altshiftContext.WithError(
@@ -662,7 +785,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 				slog.ErrorContext(
 					altshiftContext.WithError(
 						ctxWithTlsDns,
-						altshiftErrors.New(fmt.Errorf("handle: %w", err), request),
+						altshiftErrors.New(fmt.Errorf("handle: %w", err), query),
 					),
 					"",
 					makeEventGroup(
@@ -742,22 +865,16 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	r.countResponseRcode(response.Rcode)
 
-	// Apply changes to the response so that it can be used with the request.
+	// Make the reply to this asker out of the response, which is shared.
 
-	response = response.Copy()
-	response.Id = request.Id
+	response = buildReply(request, response)
 
 	if cacheHit {
 		dns_utils.ApplyRemainingTtl(response, uint32(max(int64(0), min(int64(remainingTtl.Seconds()), int64(math.MaxUint32)))))
 	}
 
 	if strings.HasPrefix(transportProtocol, "udp") {
-		bufferSize := uint16(512)
-		if opt := request.IsEdns0(); opt != nil {
-			bufferSize = opt.UDPSize()
-		}
-
-		response.Truncate(int(bufferSize))
+		response.Truncate(int(replyUDPSize(request)))
 	}
 
 	// Write the response.

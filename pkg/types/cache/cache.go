@@ -22,6 +22,7 @@ type Key struct {
 	Qtype  uint16
 	Qclass uint16
 	DO     bool
+	CD     bool
 }
 
 type Entry struct {
@@ -59,6 +60,7 @@ type EntryInfo struct {
 	Type       string `json:"type"`
 	Class      string `json:"class"`
 	DO         bool   `json:"do"`
+	CD         bool   `json:"cd"`
 	Rcode      string `json:"rcode"`
 	Answers    int    `json:"answers"`
 	RemainingS int    `json:"remaining_s"`
@@ -126,6 +128,15 @@ func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) b
 		return false
 	}
 
+	// A negative answer holds for as long as its SOA says (RFC 2308 §5). One
+	// without an SOA says nothing about that and is not cached; it would
+	// otherwise take the 24h cap. An upstream answering a query it did not
+	// recurse for, from what it happened to have cached, sends just that.
+	if isNegative(message) && !hasSoa(message.Ns) {
+		c.rejections.Add(1)
+		return false
+	}
+
 	ttl := dns_utils.EffectiveMessageTtl(message)
 	if ttl <= 0 {
 		c.rejections.Add(1)
@@ -141,6 +152,21 @@ func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) b
 
 	c.insertions.Add(1)
 	return true
+}
+
+// isNegative reports whether message says the name does not exist (NXDOMAIN)
+// or has no records of the type asked for (NODATA).
+func isNegative(message *dns.Msg) bool {
+	return message.Rcode == dns.RcodeNameError || len(message.Answer) == 0
+}
+
+func hasSoa(records []dns.RR) bool {
+	for _, record := range records {
+		if _, ok := record.(*dns.SOA); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Stats returns a snapshot of the cache counters and current size.
@@ -186,6 +212,7 @@ func (c *Cache) Snapshot() []EntryInfo {
 			Type:       dns.TypeToString[key.Qtype],
 			Class:      dns.ClassToString[key.Qclass],
 			DO:         key.DO,
+			CD:         key.CD,
 			Rcode:      rcode,
 			Answers:    answers,
 			RemainingS: int(remaining.Seconds()),
