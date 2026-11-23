@@ -1,12 +1,13 @@
 package abp_blocklist
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,6 +20,17 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/net/idna"
 )
+
+// MaxFileSize bounds the blocklist file Reload reads. The largest lists in
+// use are a few tens of megabytes at most.
+const MaxFileSize = 64 << 20
+
+// maxRuleLength bounds a line read as a rule: a name is at most 253 bytes, and
+// no rule this parser understands comes near the bound. Longer lines are
+// skipped rather than parsed.
+const maxRuleLength = 4096
+
+var errFileTooLarge = errors.New("file too large")
 
 func isAscii(s string) bool {
 	for i := range len(s) {
@@ -81,39 +93,75 @@ func splitHeader(s string) (string, string, bool) {
 	return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:]), true
 }
 
-// List is an immutable parsed snapshot of an ABP-format blocklist.
+// List is an immutable parsed snapshot of an ABP-format blocklist. A rule
+// with the important option goes in BlockImportant or AllowImportant: an
+// important rule wins over one without, and an allow rule over a block rule of
+// the same standing, as AdGuard orders them.
 type List struct {
-	Rule  *schema.Rule
-	Block map[string]struct{}
-	Allow map[string]struct{}
+	Rule           *schema.Rule
+	Block          map[string]struct{}
+	Allow          map[string]struct{}
+	BlockImportant map[string]struct{}
+	AllowImportant map[string]struct{}
 }
 
 func (l *List) IsBlocked(qname string) bool {
-	host := normalizeQname(qname)
+	var blocked, allowed, blockedImportant, allowedImportant bool
 
-	for h := host; ; {
-		if _, ok := l.Allow[h]; ok {
-			return false
-		}
-		if i := strings.IndexByte(h, '.'); i < 0 {
+	for h := normalizeQname(qname); ; {
+		_, ok := l.AllowImportant[h]
+		allowedImportant = allowedImportant || ok
+		_, ok = l.BlockImportant[h]
+		blockedImportant = blockedImportant || ok
+		_, ok = l.Allow[h]
+		allowed = allowed || ok
+		_, ok = l.Block[h]
+		blocked = blocked || ok
+
+		i := strings.IndexByte(h, '.')
+		if i < 0 {
 			break
-		} else {
-			h = h[i+1:]
 		}
+		h = h[i+1:]
 	}
 
-	for h := host; ; {
-		if _, ok := l.Block[h]; ok {
-			return true
-		}
-		if i := strings.IndexByte(h, '.'); i < 0 {
-			break
-		} else {
-			h = h[i+1:]
+	switch {
+	case allowedImportant:
+		return false
+	case blockedImportant:
+		return true
+	case allowed:
+		return false
+	default:
+		return blocked
+	}
+}
+
+// parseOptions reads the options after a rule's $. It reports whether the
+// rule still applies to every request for its host, which is all a DNS
+// resolver can act on, and whether it is important. An option that narrows a
+// rule -- to third-party requests, a client, a record type -- makes the rule
+// one this parser cannot honour, and it is skipped rather than widened.
+func parseOptions(options string) (applies bool, important bool) {
+	for _, option := range strings.Split(options, ",") {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "important":
+			important = true
+		case "all":
+		default:
+			return false, false
 		}
 	}
+	return true, important
+}
 
-	return false
+// nextLine splits the first line off data, without the length limit a
+// bufio.Scanner would impose on it.
+func nextLine(data []byte) (line []byte, rest []byte) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return data[:i], data[i+1:]
+	}
+	return data, nil
 }
 
 func (l *List) GetRule() *schema.Rule {
@@ -128,12 +176,19 @@ func (l *List) GetRule() *schema.Rule {
 func FromBytes(name string, data []byte) (*List, error) {
 	block := make(map[string]struct{}, 1<<18)
 	allow := make(map[string]struct{}, 1<<16)
+	blockImportant := make(map[string]struct{})
+	allowImportant := make(map[string]struct{})
 
 	var title, version, lastModified string
 
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	for rest := data; len(rest) > 0; {
+		var rawLine []byte
+		rawLine, rest = nextLine(rest)
+		if len(rawLine) > maxRuleLength {
+			continue
+		}
+
+		line := strings.TrimSpace(string(rawLine))
 		if line == "" {
 			continue
 		}
@@ -152,27 +207,43 @@ func FromBytes(name string, data []byte) (*List, error) {
 			continue
 		}
 
-		if strings.ContainsAny(line, "/$*") {
+		pattern, options, hasOptions := strings.Cut(line, "$")
+		var important bool
+		if hasOptions {
+			var applies bool
+			if applies, important = parseOptions(options); !applies {
+				continue
+			}
+		}
+
+		if strings.ContainsAny(pattern, "/*") {
 			continue
 		}
 
+		var target map[string]struct{}
+		var host string
 		switch {
-		case strings.HasPrefix(line, "@@||"):
-			if h := extractHost(line[4:]); h != "" {
-				if a, ok := toAscii(h); ok {
-					allow[a] = struct{}{}
-				}
+		case strings.HasPrefix(pattern, "@@||"):
+			host = pattern[4:]
+			target = allow
+			if important {
+				target = allowImportant
 			}
-		case strings.HasPrefix(line, "||"):
-			if h := extractHost(line[2:]); h != "" {
-				if a, ok := toAscii(h); ok {
-					block[a] = struct{}{}
-				}
+		case strings.HasPrefix(pattern, "||"):
+			host = pattern[2:]
+			target = block
+			if important {
+				target = blockImportant
+			}
+		default:
+			continue
+		}
+
+		if h := extractHost(host); h != "" {
+			if a, ok := toAscii(h); ok {
+				target[a] = struct{}{}
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("scanner err: %w", err), scanner)
 	}
 
 	sum := sha256.Sum256(data)
@@ -194,23 +265,31 @@ func FromBytes(name string, data []byte) (*List, error) {
 		rule.Version = hash
 	}
 
-	return &List{Rule: rule, Block: block, Allow: allow}, nil
+	return &List{
+		Rule:           rule,
+		Block:          block,
+		Allow:          allow,
+		BlockImportant: blockImportant,
+		AllowImportant: allowImportant,
+	}, nil
 }
 
 // Source is a live, reloadable view of a blocklist file on disk. It is safe
 // for concurrent use; the snapshot pointer is swapped atomically and the
 // resolver consumes it through the Blocklist interface (IsBlocked / GetRule).
 type Source struct {
-	name     string
-	path     string
-	snapshot atomic.Pointer[List]
+	name string
+	path string
+	// maxFileSize bounds the file Reload reads.
+	maxFileSize int64
+	snapshot    atomic.Pointer[List]
 }
 
 // New creates a Source bound to path. The configured name takes precedence
 // over a `! Title:` header in the file. The file is not read until Reload is
 // called.
 func New(name, path string) *Source {
-	return &Source{name: name, path: path}
+	return &Source{name: name, path: path, maxFileSize: MaxFileSize}
 }
 
 // Name returns the configured blocklist name.
@@ -274,9 +353,9 @@ func (s *Source) Reload() (bool, error) {
 		return false, nil
 	}
 
-	data, err := os.ReadFile(s.path)
+	data, err := readFile(s.path, s.maxFileSize)
 	if err != nil {
-		return false, altshiftErrors.New(fmt.Errorf("os read file: %w", err), s.path)
+		return false, altshiftErrors.New(fmt.Errorf("read file: %w", err), s.path)
 	}
 
 	list, err := FromBytes(s.name, data)
@@ -291,6 +370,24 @@ func (s *Source) Reload() (bool, error) {
 
 	s.snapshot.Store(list)
 	return true, nil
+}
+
+// readFile reads the file at path, refusing one larger than maxSize.
+func readFile(path string, maxSize int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("os open: %w", err), path)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+	if err != nil {
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("io read all: %w", err), path)
+	}
+	if int64(len(data)) > maxSize {
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("%w: over %d bytes", errFileTooLarge, maxSize), path)
+	}
+	return data, nil
 }
 
 // Watch blocks until ctx is cancelled, reloading the blocklist file whenever
