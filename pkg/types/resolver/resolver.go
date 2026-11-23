@@ -71,6 +71,9 @@ func makeEventGroup(action, reason, outcome string, eventTypes ...string) slog.A
 
 type Blocklist interface {
 	IsBlocked(qname string) bool
+	// IsAllowed reports whether an allow rule of the list matches qname and
+	// wins within it.
+	IsAllowed(qname string) bool
 	GetRule() *schema.Rule
 }
 
@@ -653,8 +656,20 @@ func (r *Resolver) blockingList(name string) Blocklist {
 	return nil
 }
 
+// allowedByAny reports whether some blocklist explicitly allows name.
+func (r *Resolver) allowedByAny(name string) bool {
+	for _, blocklist := range r.Blocklists() {
+		if blocklist.IsAllowed(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // blockedTarget returns the first blocklist blocking a name that answer's CNAME
-// or DNAME records lead to, and that name.
+// or DNAME records lead to, and that name. A target some list explicitly
+// allows is not blocked by another list's rule, as an allow rule is how a
+// list's owner says that name is wanted.
 func (r *Resolver) blockedTarget(answer *dns.Msg) (Blocklist, string) {
 	for _, record := range answer.Answer {
 		var target string
@@ -664,6 +679,9 @@ func (r *Resolver) blockedTarget(answer *dns.Msg) (Blocklist, string) {
 		case *dns.DNAME:
 			target = typedRecord.Target
 		default:
+			continue
+		}
+		if r.allowedByAny(target) {
 			continue
 		}
 		if blocklist := r.blockingList(target); blocklist != nil {
@@ -1003,7 +1021,9 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	// An answer can lead to a name of its own through CNAME or DNAME records,
 	// which is how a tracker is put behind a first-party name. Checked here
 	// rather than when the answer was cached, a name listed since is caught.
-	if response != nil && (cacheHit || forwarded) {
+	// A question name some list explicitly allows is wanted wherever its
+	// answer leads, so its targets are not checked.
+	if response != nil && (cacheHit || forwarded) && !r.allowedByAny(question.Name) {
 		if blocklist, target := r.blockedTarget(response); blocklist != nil {
 			r.logBlocked(
 				dnsUtilsContext.WithDnsContextValue(

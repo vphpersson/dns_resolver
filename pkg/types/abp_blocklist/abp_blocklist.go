@@ -105,7 +105,21 @@ type List struct {
 	AllowImportant map[string]struct{}
 }
 
-func (l *List) IsBlocked(qname string) bool {
+// verdict is what a list says of a name.
+type verdict int
+
+const (
+	// verdictNone is a name no rule of the list matches.
+	verdictNone verdict = iota
+	// verdictBlocked is a name a block rule matches and no allow rule
+	// overrides.
+	verdictBlocked
+	// verdictAllowed is a name an allow rule matches and wins for.
+	verdictAllowed
+)
+
+// verdict judges qname by the rules matching it or a name above it.
+func (l *List) verdict(qname string) verdict {
 	var blocked, allowed, blockedImportant, allowedImportant bool
 
 	for h := normalizeQname(qname); ; {
@@ -127,14 +141,27 @@ func (l *List) IsBlocked(qname string) bool {
 
 	switch {
 	case allowedImportant:
-		return false
+		return verdictAllowed
 	case blockedImportant:
-		return true
+		return verdictBlocked
 	case allowed:
-		return false
+		return verdictAllowed
+	case blocked:
+		return verdictBlocked
 	default:
-		return blocked
+		return verdictNone
 	}
+}
+
+func (l *List) IsBlocked(qname string) bool {
+	return l.verdict(qname) == verdictBlocked
+}
+
+// IsAllowed reports whether an allow rule of the list matches qname and wins
+// over the list's block rules: an explicit allow, as against a name the list
+// says nothing of.
+func (l *List) IsAllowed(qname string) bool {
+	return l.verdict(qname) == verdictAllowed
 }
 
 // parseOptions reads the options after a rule's $. It reports, first, whether
@@ -331,6 +358,19 @@ func (s *Source) IsBlocked(qname string) bool {
 		return false
 	}
 	return list.IsBlocked(qname)
+}
+
+// IsAllowed satisfies the resolver Blocklist interface. Before any successful
+// Reload it allows nothing.
+func (s *Source) IsAllowed(qname string) bool {
+	if s == nil {
+		return false
+	}
+	list := s.snapshot.Load()
+	if list == nil {
+		return false
+	}
+	return list.IsAllowed(qname)
 }
 
 // GetRule satisfies the resolver Blocklist interface.

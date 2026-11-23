@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"dns_resolver/pkg/types/abp_blocklist"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,8 @@ func (b *testBlocklist) IsBlocked(qname string) bool {
 		name = name[index+1:]
 	}
 }
+
+func (b *testBlocklist) IsAllowed(string) bool { return false }
 
 func (b *testBlocklist) GetRule() *schema.Rule { return &schema.Rule{Name: "test"} }
 
@@ -171,6 +174,87 @@ func TestServeDNS_BlocklistAndHostsOverCache(t *testing.T) {
 			second := ask(resolver, "udp", newQuery("victim.example.", dns.TypeA))
 			if second == nil || !testCase.wantSecond(second) {
 				t.Fatalf("second reply = %v; not what was wanted", second)
+			}
+		})
+	}
+}
+
+// An allow rule in one list is honoured when another list blocks a name an
+// answer leads to: a question name a list allows is not blocked for its CNAME
+// targets, and a target a list allows is not blocked by another's rule. The
+// target check blocked whenever any list blocked the target, and an allow rule
+// acted only within its own list, so personal's @@||good.example^ could not
+// unblock good.example's CNAME into a name oisd_big lists. A direct query is
+// judged as before: by each list on its own.
+func TestServeDNS_AllowAcrossLists(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name        string
+		personal    string
+		oisdBig     string
+		qname       string
+		cnameTarget string
+		wantBlocked bool
+	}{
+		{
+			name:        "question allowed by another list",
+			personal:    "@@||good.example^",
+			oisdBig:     "||tracker.example^",
+			qname:       "good.example.",
+			cnameTarget: "cdn.tracker.example.",
+		},
+		{
+			name:        "target allowed by another list",
+			personal:    "@@||cdn.tracker.example^",
+			oisdBig:     "||tracker.example^",
+			qname:       "www.example.com.",
+			cnameTarget: "cdn.tracker.example.",
+		},
+		{
+			name:        "target allowed in its own list",
+			oisdBig:     "||tracker.example^\n@@||cdn.tracker.example^",
+			qname:       "www.example.com.",
+			cnameTarget: "cdn.tracker.example.",
+		},
+		{
+			name:        "nothing allows the target",
+			personal:    "@@||unrelated.example^",
+			oisdBig:     "||tracker.example^",
+			qname:       "www.example.com.",
+			cnameTarget: "cdn.tracker.example.",
+			wantBlocked: true,
+		},
+		{
+			name:        "direct query of a name another list allows",
+			personal:    "@@||tracker.example^",
+			oisdBig:     "||tracker.example^",
+			qname:       "tracker.example.",
+			wantBlocked: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			answer := answerWith("192.0.2.1")
+			if testCase.cnameTarget != "" {
+				answer = answerCname(testCase.cnameTarget)
+			}
+			upstream := startUpstream(t, answer)
+			resolver := newTestResolver(t, upstream)
+			for name, content := range map[string]string{"personal": testCase.personal, "oisd_big": testCase.oisdBig} {
+				list, err := abp_blocklist.FromBytes(name, []byte(content))
+				if err != nil {
+					t.Fatalf("from bytes (%s): %v", name, err)
+				}
+				resolver.SetBlocklist(name, list)
+			}
+
+			reply := ask(resolver, "udp", newQuery(testCase.qname, dns.TypeA))
+			if blocked := isBlockedReply(reply); blocked != testCase.wantBlocked {
+				t.Fatalf("blocked = %t; want %t (reply %v)", blocked, testCase.wantBlocked, reply)
 			}
 		})
 	}

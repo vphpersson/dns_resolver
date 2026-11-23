@@ -35,15 +35,18 @@ func TestList_IsBlocked(t *testing.T) {
 		name  string
 		qname string
 		want  bool
+		// wantAllowed is whether an allow rule matches and wins.
+		wantAllowed bool
 	}{
 		{name: "listed", qname: "ads.example.", want: true},
 		{name: "below a listed name", qname: "a.b.ads.example.", want: true},
-		{name: "allowed below a listed name", qname: "ok.ads.example.", want: false},
+		{name: "allowed below a listed name", qname: "ok.ads.example.", want: false, wantAllowed: true},
+		{name: "below an allowed name", qname: "a.ok.ads.example.", want: false, wantAllowed: true},
 		{name: "case and no trailing dot", qname: "ADS.Example", want: true},
 		{name: "unlisted", qname: "example.", want: false},
 		{name: "important over an allow rule", qname: "tracker.example.", want: true},
 		{name: "important below an allow rule", qname: "x.tracker.example.", want: true},
-		{name: "important allow over important block", qname: "vip.tracker.example.", want: false},
+		{name: "important allow over important block", qname: "vip.tracker.example.", want: false, wantAllowed: true},
 		{name: "option narrowing the rule", qname: "third.example.", want: false},
 		{name: "all", qname: "all.example.", want: true},
 		{name: "options in any case, combined", qname: "shout.example.", want: true},
@@ -60,6 +63,9 @@ func TestList_IsBlocked(t *testing.T) {
 
 			if got := list.IsBlocked(testCase.qname); got != testCase.want {
 				t.Fatalf("IsBlocked(%q) = %t; want %t", testCase.qname, got, testCase.want)
+			}
+			if got := list.IsAllowed(testCase.qname); got != testCase.wantAllowed {
+				t.Fatalf("IsAllowed(%q) = %t; want %t", testCase.qname, got, testCase.wantAllowed)
 			}
 		})
 	}
