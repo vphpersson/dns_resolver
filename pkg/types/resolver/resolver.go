@@ -345,6 +345,9 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 
 			response, err = dns_utils.ExchangeWithConn(ctx, request, client, connection)
 			if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
+				// An rcode is the upstream's answer, not a fault of the
+				// connection, which the deferred Put returns to the pool.
+				err = nil
 				return true, nil
 			}
 
