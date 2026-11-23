@@ -7,14 +7,19 @@ package local_zone
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/miekg/dns"
 )
 
+// localhostZone and every name below it are loopback (RFC 6761 section 6.3).
+const localhostZone = "localhost."
+
 // specialUseZones are the special-use domains a caching resolver answers
 // itself.
 var specialUseZones = []string{
+	localhostZone,    // RFC 6761
 	"home.arpa.",     // RFC 8375
 	"resolver.arpa.", // RFC 9462: about this resolver, not the upstream
 	"local.",         // RFC 6762: multicast DNS only
@@ -84,13 +89,14 @@ var singleLabelTypes = map[uint16]struct{}{
 // the zone it falls in, which is empty for a single-label name. A DS query at
 // a zone's apex is not answered locally: the DS record lives in the parent,
 // whose proof that the zone is unsigned is what lets a validating client
-// accept the zone's local answers.
+// accept the zone's local answers. localhost is the exception, as no query
+// for it is to reach an authoritative server (RFC 6761 section 6.3).
 func Match(name string, qtype uint16) (string, bool) {
 	name = strings.ToLower(dns.Fqdn(name))
 
 	for candidate := name; candidate != "."; {
 		if _, found := zones[candidate]; found {
-			if qtype == dns.TypeDS && candidate == name {
+			if qtype == dns.TypeDS && candidate == name && candidate != localhostZone {
 				return "", false
 			}
 			return candidate, true
@@ -118,9 +124,10 @@ const soaTtl = 60
 
 // Response answers request locally, its question being one Match accepted
 // with zone. A name below the zone does not exist; the zone's own apex exists
-// and holds nothing. The SOA in the authority section is what lets a client
-// cache the answer (RFC 2308); a single-label name, which has no zone, gets
-// none.
+// and holds nothing. Every name at or below localhost exists, holding the
+// loopback addresses and nothing else. The SOA in the authority section of a
+// negative answer is what lets a client cache it (RFC 2308); a single-label
+// name, which has no zone, gets none.
 func Response(request *dns.Msg, zone string) *dns.Msg {
 	response := new(dns.Msg)
 	response.SetRcode(request, dns.RcodeNameError)
@@ -131,9 +138,22 @@ func Response(request *dns.Msg, zone string) *dns.Msg {
 		return response
 	}
 
-	if len(request.Question) > 0 && strings.EqualFold(dns.Fqdn(request.Question[0].Name), zone) {
+	var question dns.Question
+	if len(request.Question) > 0 {
+		question = request.Question[0]
+	}
+
+	switch {
+	case zone == localhostZone:
+		response.Rcode = dns.RcodeSuccess
+		if record := loopbackRecord(question); record != nil {
+			response.Answer = []dns.RR{record}
+			return response
+		}
+	case strings.EqualFold(dns.Fqdn(question.Name), zone):
 		response.Rcode = dns.RcodeSuccess
 	}
+
 	response.Ns = []dns.RR{&dns.SOA{
 		Hdr:     dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: soaTtl},
 		Ns:      "localhost.",
@@ -145,4 +165,18 @@ func Response(request *dns.Msg, zone string) *dns.Msg {
 		Minttl:  soaTtl,
 	}}
 	return response
+}
+
+// loopbackRecord is the answer to question for a localhost name, or nil for a
+// type that has none.
+func loopbackRecord(question dns.Question) dns.RR {
+	header := dns.RR_Header{Name: question.Name, Rrtype: question.Qtype, Class: dns.ClassINET, Ttl: soaTtl}
+	switch question.Qtype {
+	case dns.TypeA:
+		return &dns.A{Hdr: header, A: net.IPv4(127, 0, 0, 1).To4()}
+	case dns.TypeAAAA:
+		return &dns.AAAA{Hdr: header, AAAA: net.IPv6loopback}
+	default:
+		return nil
+	}
 }

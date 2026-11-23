@@ -42,6 +42,11 @@ func TestMatch(t *testing.T) {
 		{name: "top-level domain ds", qname: "com.", qtype: dns.TypeDS},
 		{name: "root", qname: ".", qtype: dns.TypeNS},
 		{name: "public name", qname: "www.example.com.", qtype: dns.TypeA},
+		{name: "localhost", qname: "localhost.", qtype: dns.TypeA, wantZone: "localhost.", wantOk: true},
+		{name: "below localhost", qname: "app.dev.localhost.", qtype: dns.TypeAAAA, wantZone: "localhost.", wantOk: true},
+		{name: "localhost other type", qname: "localhost.", qtype: dns.TypeMX, wantZone: "localhost.", wantOk: true},
+		{name: "localhost ds", qname: "localhost.", qtype: dns.TypeDS, wantZone: "localhost.", wantOk: true},
+		{name: "a name ending in localhost", qname: "notlocalhost.", qtype: dns.TypeNS},
 		{name: "a public name ending like a zone", qname: "notlocal.", qtype: dns.TypeNS},
 	}
 
@@ -88,6 +93,61 @@ func TestResponse(t *testing.T) {
 			}
 			if testCase.wantSoa && response.Ns[0].Header().Name != testCase.zone {
 				t.Fatalf("SOA owner = %q; want %q", response.Ns[0].Header().Name, testCase.zone)
+			}
+		})
+	}
+}
+
+// localhost and every name below it are loopback (RFC 6761 section 6.3).
+func TestResponse_Localhost(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		qname      string
+		qtype      uint16
+		wantAnswer string
+	}{
+		{name: "a", qname: "localhost.", qtype: dns.TypeA, wantAnswer: "127.0.0.1"},
+		{name: "aaaa", qname: "localhost.", qtype: dns.TypeAAAA, wantAnswer: "::1"},
+		{name: "below, asker's case", qname: "App.LocalHost.", qtype: dns.TypeA, wantAnswer: "127.0.0.1"},
+		{name: "other type", qname: "localhost.", qtype: dns.TypeTXT},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			request := new(dns.Msg)
+			request.SetQuestion(testCase.qname, testCase.qtype)
+			zone, ok := Match(testCase.qname, testCase.qtype)
+			if !ok {
+				t.Fatalf("Match(%q) did not match", testCase.qname)
+			}
+			response := Response(request, zone)
+			if response.Rcode != dns.RcodeSuccess {
+				t.Fatalf("rcode = %s; want NOERROR", dns.RcodeToString[response.Rcode])
+			}
+
+			if testCase.wantAnswer == "" {
+				if len(response.Answer) != 0 || len(response.Ns) != 1 {
+					t.Fatalf("answers=%d authority=%d; want NODATA with an SOA", len(response.Answer), len(response.Ns))
+				}
+				return
+			}
+			if len(response.Answer) != 1 {
+				t.Fatalf("answers = %v; want one", response.Answer)
+			}
+			record := response.Answer[0]
+			var got string
+			switch typedRecord := record.(type) {
+			case *dns.A:
+				got = typedRecord.A.String()
+			case *dns.AAAA:
+				got = typedRecord.AAAA.String()
+			}
+			if got != testCase.wantAnswer || record.Header().Name != testCase.qname || record.Header().Rrtype != testCase.qtype {
+				t.Fatalf("answer = %v; want %s %s %s", record, testCase.qname, dns.TypeToString[testCase.qtype], testCase.wantAnswer)
 			}
 		})
 	}

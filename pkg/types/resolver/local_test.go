@@ -49,3 +49,58 @@ func TestServeDNS_LocalNames(t *testing.T) {
 		})
 	}
 }
+
+// localhost is answered with loopback (RFC 6761 section 6.3) unless the hosts
+// file says otherwise. Without a hosts line localhost was NXDOMAIN, and names
+// below it went upstream.
+func TestServeDNS_Localhost(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		qname      string
+		qtype      uint16
+		hostsEntry string
+		wantAnswer string
+	}{
+		{name: "localhost", qname: "localhost.", qtype: dns.TypeA, wantAnswer: "127.0.0.1"},
+		{name: "below localhost", qname: "app.localhost.", qtype: dns.TypeAAAA, wantAnswer: "::1"},
+		{name: "localhost other type", qname: "localhost.", qtype: dns.TypeMX},
+		{name: "hosts file first", qname: "localhost.", qtype: dns.TypeA, hostsEntry: "127.0.0.2", wantAnswer: "127.0.0.2"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := startUpstream(t, answerWith("192.0.2.1"))
+			resolver := newTestResolver(t, upstream)
+			hosts := &testHosts{}
+			if testCase.hostsEntry != "" {
+				hosts.add(testCase.qname, testCase.hostsEntry)
+			}
+			resolver.Hosts = hosts
+
+			reply := ask(resolver, "udp", newQuery(testCase.qname, testCase.qtype))
+			if reply == nil || reply.Rcode != dns.RcodeSuccess {
+				t.Fatalf("rcode = %s; want NOERROR", rcodeOf(reply))
+			}
+			if sent := upstream.receivedFor(testCase.qname); sent != 0 {
+				t.Fatalf("the query went upstream %d times", sent)
+			}
+
+			var got string
+			if len(reply.Answer) == 1 {
+				switch record := reply.Answer[0].(type) {
+				case *dns.A:
+					got = record.A.String()
+				case *dns.AAAA:
+					got = record.AAAA.String()
+				}
+			}
+			if got != testCase.wantAnswer || (testCase.wantAnswer == "" && len(reply.Answer) != 0) {
+				t.Fatalf("answer = %v; want %q", reply.Answer, testCase.wantAnswer)
+			}
+		})
+	}
+}
