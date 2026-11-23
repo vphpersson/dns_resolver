@@ -1,8 +1,11 @@
 package resolver
 
 import (
+	"dns_resolver/pkg/types/resolver_config"
 	"fmt"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -101,5 +104,117 @@ func TestServeDNS_FailedExchangeAnswersNothing(t *testing.T) {
 				t.Fatalf("cache holds %d entries after a failed exchange: %+v", len(entries), entries)
 			}
 		})
+	}
+}
+
+// startStalledUpstream accepts TCP connections and never speaks, so a TLS
+// handshake with it lasts until the client gives up.
+func startStalledUpstream(t *testing.T) *testUpstream {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	upstream := &testUpstream{address: listener.Addr().String()}
+	go func() {
+		var connections []net.Conn
+		defer func() {
+			for _, connection := range connections {
+				_ = connection.Close()
+			}
+		}()
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			upstream.accepted.Add(1)
+			connections = append(connections, connection)
+		}
+	}()
+
+	return upstream
+}
+
+// One request must not hold an upstream connection for longer than its own
+// deadline. Every timed-out exchange used to be retried up to
+// MaxNumConnections+1 times with no deadline over them, so a name the upstream
+// was slow on held a slot for minutes.
+func TestServeDNS_RequestDeadline(t *testing.T) {
+	t.Parallel()
+
+	const (
+		requestTimeout = 500 * time.Millisecond
+		// The slack allows for a slow test machine; the failure this guards
+		// against took seconds per attempt.
+		maxElapsed = requestTimeout + time.Second
+	)
+
+	testCases := []struct {
+		name     string
+		upstream func(t *testing.T) *testUpstream
+	}{
+		{
+			name: "silent upstream",
+			upstream: func(t *testing.T) *testUpstream {
+				t.Helper()
+				return startUpstream(t, func(*dns.Msg) *dns.Msg { return nil })
+			},
+		},
+		{
+			name:     "stalled handshake",
+			upstream: startStalledUpstream,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := testCase.upstream(t)
+			resolver := newTestResolver(
+				t,
+				upstream,
+				resolver_config.WithMaxConnections(8),
+				resolver_config.WithRequestTimeout(requestTimeout),
+			)
+
+			start := time.Now()
+			reply := ask(resolver, "udp", newQuery("slow.example.", dns.TypeA))
+			elapsed := time.Since(start)
+
+			if reply == nil || reply.Rcode != dns.RcodeServerFailure {
+				t.Fatalf("rcode = %s; want SERVFAIL", rcodeOf(reply))
+			}
+			if elapsed > maxElapsed {
+				t.Fatalf("request took %s; want at most %s", elapsed.Round(time.Millisecond), maxElapsed)
+			}
+			if sent := upstream.receivedFor("slow.example."); sent > maxExchangeAttempts {
+				t.Fatalf("upstream was sent the query %d times; want at most %d", sent, maxExchangeAttempts)
+			}
+		})
+	}
+}
+
+// Attempts are bounded even when each fails fast, so a name whose answers all
+// fail costs a few connections rather than one per pool slot.
+func TestServeDNS_BoundedAttempts(t *testing.T) {
+	t.Parallel()
+
+	upstream := startUpstream(t, func(query *dns.Msg) *dns.Msg {
+		response := answerWith("192.0.2.1")(query)
+		response.Id = query.Id ^ 0xffff
+		return response
+	})
+	resolver := newTestResolver(t, upstream, resolver_config.WithMaxConnections(16))
+
+	if reply := ask(resolver, "udp", newQuery("failing.example.", dns.TypeA)); reply == nil || reply.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %s; want SERVFAIL", rcodeOf(reply))
+	}
+	if sent := upstream.receivedFor("failing.example."); sent != maxExchangeAttempts {
+		t.Fatalf("upstream was sent the query %d times; want %d", sent, maxExchangeAttempts)
 	}
 }

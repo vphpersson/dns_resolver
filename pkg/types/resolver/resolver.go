@@ -37,8 +37,15 @@ import (
 
 const (
 	// dialTimeout bounds establishing a new upstream DoT connection, covering
-	// both the TCP and TLS handshakes.
+	// both the TCP and TLS handshakes. The request's own deadline bounds it too.
 	dialTimeout = 5 * time.Second
+	// exchangeTimeout bounds one write and one read of an upstream exchange.
+	exchangeTimeout = 2 * time.Second
+	// maxExchangeAttempts is how many upstream connections one request may
+	// try. A second attempt covers a pooled connection the upstream closed
+	// while it sat idle; beyond that a failure is the name's, not the
+	// connection's, and retrying only holds more connections for longer.
+	maxExchangeAttempts = 3
 	// keepAlivePeriod sets the TCP keep-alive interval on upstream DoT
 	// connections. It keeps idle connections warm across middleboxes/NAT and
 	// surfaces dead peers promptly, so a reused-but-closed connection fails
@@ -214,9 +221,12 @@ type Resolver struct {
 	// MaintenanceInterval drives the upstream pool's keep-alive/eviction loop
 	// when started via StartConnectionMaintenance (DoT mode only).
 	MaintenanceInterval time.Duration
-	metrics             resolverMetrics
-	blocklistsMu        sync.Mutex
-	blocklists          atomic.Pointer[blocklistSet]
+	// RequestTimeout bounds the handling of one request; <= 0 means
+	// resolver_config.DefaultRequestTimeout.
+	RequestTimeout time.Duration
+	metrics        resolverMetrics
+	blocklistsMu   sync.Mutex
+	blocklists     atomic.Pointer[blocklistSet]
 }
 
 // Metrics returns a snapshot of the resolver and cache counters.
@@ -328,64 +338,73 @@ func (r *Resolver) handleDot(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 		return nil, altshiftErrors.NewWithTrace(nil_error.New("connection pool"))
 	}
 
-	var response *dns.Msg
-
-	for range connectionPool.MaxNumConnections + 1 {
-		done, err := func() (bool, error) {
-			var err error
-			var connection *dns.Conn
-
-			connection, err = connectionPool.Get(ctx)
-			if err != nil {
-				return false, altshiftErrors.New(fmt.Errorf("connection pool get: %w", err), connectionPool)
-			}
-			defer func() {
-				connectionPool.Put(ctx, connection, err)
-			}()
-
-			// What a failed exchange read is not an answer, so the response
-			// is taken only once the exchange has succeeded.
-			exchanged, err := dns_utils.ExchangeWithConn(ctx, request, client, connection)
-			if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
-				// An rcode is the upstream's answer, not a fault of the
-				// connection, which the deferred Put returns to the pool.
-				err = checkAnswer(request, exchanged)
-				if err == nil {
-					response = exchanged
-					return true, nil
-				}
-			}
-
-			r.metrics.exchangeErrors.Add(1)
-
-			if !altshiftErrors.IsClosedError(err) {
-				slog.WarnContext(
-					altshiftContext.WithError(ctx, err),
-					"",
-					makeEventGroup(
-						"dns_exchange",
-						"An error occurred when exchanging with the DNS server.",
-						"failure",
-						"connection", "protocol", "error",
-					),
-				)
-			}
-
-			return false, nil
-		}()
-		if err != nil {
-			return nil, err
-		}
-		if done {
+	var lastErr error
+	for range maxExchangeAttempts {
+		if err := ctx.Err(); err != nil {
+			lastErr = err
 			break
 		}
+
+		response, retry, err := r.exchangeDot(ctx, request, client, connectionPool)
+		if err == nil {
+			return response, nil
+		}
+		if !retry {
+			return nil, err
+		}
+		lastErr = err
 	}
 
-	if response == nil {
-		return nil, altshiftErrors.NewWithTrace(dnsResolverErrors.ErrNoAnswer)
+	return nil, altshiftErrors.NewWithTrace(fmt.Errorf("%w: %w", dnsResolverErrors.ErrNoAnswer, lastErr))
+}
+
+// exchangeDot makes one attempt at an exchange over a pooled connection. retry
+// reports whether another connection might fare better: false when no
+// connection could be had, since the next Get would wait on the same pool.
+func (r *Resolver) exchangeDot(
+	ctx context.Context,
+	request *dns.Msg,
+	client *dns.Client,
+	connectionPool *connection_pool.Pool[*dns.Conn],
+) (response *dns.Msg, retry bool, err error) {
+	connection, err := connectionPool.Get(ctx)
+	if err != nil {
+		return nil, false, altshiftErrors.New(fmt.Errorf("connection pool get: %w", err), connectionPool)
+	}
+	// Put closes the connection when err, as it stands when this returns, is
+	// not nil.
+	defer func() {
+		connectionPool.Put(ctx, connection, err)
+	}()
+
+	// What a failed exchange read is not an answer, so the response is taken
+	// only once the exchange has succeeded.
+	exchanged, err := dns_utils.ExchangeWithConn(ctx, request, client, connection)
+	if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
+		// An rcode is the upstream's answer, not a fault of the connection.
+		err = checkAnswer(request, exchanged)
+		if err == nil {
+			return exchanged, false, nil
+		}
 	}
 
-	return response, nil
+	r.metrics.exchangeErrors.Add(1)
+
+	if !altshiftErrors.IsClosedError(err) {
+		slog.WarnContext(
+			altshiftContext.WithError(ctx, err),
+			"",
+			makeEventGroup(
+				"dns_exchange",
+				"An error occurred when exchanging with the DNS server.",
+				"failure",
+				"connection", "protocol", "error",
+			),
+		)
+	}
+
+	err = fmt.Errorf("dns utils exchange with conn: %w", err)
+	return nil, true, err
 }
 
 // checkAnswer reports whether response answers query: the question the
@@ -509,6 +528,13 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 	r.metrics.queriesTotal.Add(1)
 
+	requestTimeout := r.RequestTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = resolver_config.DefaultRequestTimeout
+	}
+	requestCtx, cancelRequest := context.WithTimeout(r.LifetimeContext, requestTimeout)
+	defer cancelRequest()
+
 	var response *dns.Msg
 	do := requestDO(request)
 	cacheKey := getCacheKey(question, do)
@@ -606,7 +632,7 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 		if response == nil {
 			var dnsContext dnsUtilsTypes.DnsContext
-			ctxWithTlsDns := altshiftTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(r.LifetimeContext, &dnsContext))
+			ctxWithTlsDns := altshiftTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(requestCtx, &dnsContext))
 
 			var err error
 			switch r.Mode {
@@ -832,6 +858,7 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 		ServerName:      serverName,
 		Cache:           cache.New(),
 		Mode:            mode,
+		RequestTimeout:  config.RequestTimeout,
 	}
 
 	switch mode {
@@ -851,10 +878,12 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 				Timeout:   dialTimeout,
 				KeepAlive: keepAlivePeriod,
 			},
-			TLSConfig: tlsConfig,
+			TLSConfig:    tlsConfig,
+			ReadTimeout:  exchangeTimeout,
+			WriteTimeout: exchangeTimeout,
 		}
 		connectionPool := connection_pool.New[*dns.Conn](
-			func() (*dns.Conn, error) {
+			func(ctx context.Context) (*dns.Conn, error) {
 				if client == nil {
 					return nil, altshiftErrors.NewWithTrace(nil_error.New("dns client"))
 				}
@@ -864,10 +893,10 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 					return nil, altshiftErrors.NewWithTrace(empty_error.New("dns server"))
 				}
 
-				connection, err := client.Dial(resolverServerAddress)
+				connection, err := client.DialContext(ctx, resolverServerAddress)
 				if err != nil {
 					return nil, altshiftErrors.NewWithTrace(
-						fmt.Errorf("client dial: %w", err),
+						fmt.Errorf("client dial context: %w", err),
 						client,
 						resolverServerAddress,
 					)

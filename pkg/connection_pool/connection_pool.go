@@ -24,7 +24,10 @@ type idleConnection[T io.Closer] struct {
 
 type Pool[T io.Closer] struct {
 	MaxNumConnections int
-	MakeConnection    func() (T, error)
+	// MakeConnection dials a new connection. The context is the caller's: the
+	// one Get was handed, or Maintain's, so a dial ends when the request that
+	// asked for it does.
+	MakeConnection func(context.Context) (T, error)
 
 	// IdleTimeout, when > 0, causes a connection that has sat idle in the pool
 	// for longer than this to be discarded rather than handed out or retained.
@@ -49,7 +52,7 @@ type Pool[T io.Closer] struct {
 	closed               bool
 }
 
-func New[T io.Closer](fn func() (T, error)) *Pool[T] {
+func New[T io.Closer](fn func(context.Context) (T, error)) *Pool[T] {
 	mutex := new(sync.Mutex)
 	return &Pool[T]{
 		MaxNumConnections: 5,
@@ -160,7 +163,7 @@ func (pool *Pool[T]) Get(ctx context.Context) (T, error) {
 	pool.numActiveConnections++
 	pool.mutex.Unlock()
 
-	connection, err := pool.MakeConnection()
+	connection, err := pool.MakeConnection(ctx)
 	if err != nil {
 		pool.mutex.Lock()
 		pool.numActiveConnections--
@@ -346,7 +349,7 @@ func (pool *Pool[T]) replenish(ctx context.Context) {
 		pool.numActiveConnections++
 		pool.mutex.Unlock()
 
-		connection, err := pool.MakeConnection()
+		connection, err := pool.MakeConnection(ctx)
 		if err != nil {
 			pool.mutex.Lock()
 			pool.numActiveConnections--

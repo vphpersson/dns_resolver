@@ -12,7 +12,7 @@ type benchConn struct{}
 func (benchConn) Close() error { return nil }
 
 func BenchmarkGetPut(b *testing.B) {
-	pool := connection_pool.New[benchConn](func() (benchConn, error) { return benchConn{}, nil })
+	pool := connection_pool.New[benchConn](func(context.Context) (benchConn, error) { return benchConn{}, nil })
 	pool.MaxNumConnections = 8
 	ctx := context.Background()
 

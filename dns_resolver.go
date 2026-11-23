@@ -34,7 +34,25 @@ var (
 	errInvalidMinWarmConnections = errors.New("invalid min warm connections")
 	errInvalidBlocklist          = errors.New("invalid blocklist")
 	errDuplicateBlocklistName    = errors.New("duplicate blocklist name")
+	errNegativeDuration          = errors.New("negative duration")
+	errNonPositiveDuration       = errors.New("non-positive duration")
 )
+
+// parseDuration parses a duration flag value. A negative value is refused, and
+// so is zero unless allowZero is set.
+func parseDuration(value string, allowZero bool) (time.Duration, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("time parse duration: %w", err)
+	}
+	if duration < 0 {
+		return 0, fmt.Errorf("%w: %s", errNegativeDuration, value)
+	}
+	if duration == 0 && !allowZero {
+		return 0, fmt.Errorf("%w: %s", errNonPositiveDuration, value)
+	}
+	return duration, nil
+}
 
 const programName = "dns_resolver"
 
@@ -103,6 +121,7 @@ func main() {
 	minWarmConnections := resolver_config.DefaultMinIdleConnections
 	idleTimeoutString := resolver_config.DefaultIdleTimeout.String()
 	keepAliveIntervalString := resolver_config.DefaultKeepAliveInterval.String()
+	requestTimeoutString := resolver_config.DefaultRequestTimeout.String()
 
 	parser := &argumentParserPkg.Parser{
 		ProgramName: programName,
@@ -119,6 +138,7 @@ func main() {
 			option.NewIntOption('w', "min-warm-connections", "warm upstream DoT connections kept ready; 0 disables (dot mode)", false, &minWarmConnections),
 			option.NewStringOption('i', "idle-timeout", "idle timeout for surplus pooled connections, e.g. 30s (dot mode)", false, &idleTimeoutString),
 			option.NewStringOption('k', "keepalive-interval", "keep-alive ping interval for warm connections, e.g. 10s; 0 disables (dot mode)", false, &keepAliveIntervalString),
+			option.NewStringOption('t', "request-timeout", "time allowed to answer one request, upstream attempts included, e.g. 4s", false, &requestTimeoutString),
 			option.NewStringOption('I', "info", "address:port for the diagnostic HTTP server (/metrics, /cache); omit to disable. Bind to loopback/LAN only", false, &infoAddress),
 		},
 	}
@@ -176,19 +196,27 @@ func main() {
 		)
 	}
 
-	idleTimeout, err := time.ParseDuration(idleTimeoutString)
-	if err != nil || idleTimeout < 0 {
+	idleTimeout, err := parseDuration(idleTimeoutString, true)
+	if err != nil {
 		logger.FatalWithExitingMessage(
 			"The idle timeout is invalid.",
-			altshiftErrors.NewWithTrace(fmt.Errorf("invalid idle timeout %q: %w", idleTimeoutString, err)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("parse duration (idle timeout): %w", err), idleTimeoutString),
 		)
 	}
 
-	keepAliveInterval, err := time.ParseDuration(keepAliveIntervalString)
-	if err != nil || keepAliveInterval < 0 {
+	keepAliveInterval, err := parseDuration(keepAliveIntervalString, true)
+	if err != nil {
 		logger.FatalWithExitingMessage(
 			"The keepalive interval is invalid.",
-			altshiftErrors.NewWithTrace(fmt.Errorf("invalid keepalive interval %q: %w", keepAliveIntervalString, err)),
+			altshiftErrors.NewWithTrace(fmt.Errorf("parse duration (keepalive interval): %w", err), keepAliveIntervalString),
+		)
+	}
+
+	requestTimeout, err := parseDuration(requestTimeoutString, false)
+	if err != nil {
+		logger.FatalWithExitingMessage(
+			"The request timeout is invalid.",
+			altshiftErrors.NewWithTrace(fmt.Errorf("parse duration (request timeout): %w", err), requestTimeoutString),
 		)
 	}
 
@@ -230,6 +258,7 @@ func main() {
 		resolver_config.WithMinIdleConnections(minWarmConnections),
 		resolver_config.WithIdleTimeout(idleTimeout),
 		resolver_config.WithKeepAliveInterval(keepAliveInterval),
+		resolver_config.WithRequestTimeout(requestTimeout),
 	)
 	if err != nil {
 		logger.FatalWithExitingMessage(

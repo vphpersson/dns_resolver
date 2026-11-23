@@ -48,7 +48,7 @@ func newMockConnection() (*mockConnection, error) {
 func TestConnectionPool_New(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 
@@ -64,7 +64,7 @@ func TestConnectionPool_New(t *testing.T) {
 func TestConnectionPool_GetPut(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 
@@ -88,7 +88,7 @@ func TestConnectionPool_GetPut(t *testing.T) {
 func TestConnectionPool_MaxConnections(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 	pool.MaxNumConnections = 2
@@ -137,7 +137,7 @@ func TestConnectionPool_MaxConnections(t *testing.T) {
 func TestConnectionPool_Close(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 
@@ -159,7 +159,7 @@ func TestConnectionPool_Close(t *testing.T) {
 func TestConnectionPool_ErrorOnPut(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 
@@ -179,7 +179,7 @@ func TestConnectionPool_ErrorOnPut(t *testing.T) {
 func TestConnectionPool_Get_MakeConnectionFails(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return nil, errConnectionCreationFailed
 	})
 
@@ -195,7 +195,7 @@ func TestConnectionPool_Get_MakeConnectionFails(t *testing.T) {
 func TestConnectionPool_CloseEmptyPool(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 
@@ -209,7 +209,7 @@ func TestConnectionPool_CloseEmptyPool(t *testing.T) {
 func TestConnectionPool_GetAfterClose(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 
@@ -229,7 +229,7 @@ func TestConnectionPool_GetAfterClose(t *testing.T) {
 func TestConnectionPool_CloseWithCheckedOutConnection(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 	pool.MaxNumConnections = 2
@@ -265,7 +265,7 @@ func TestConnectionPool_CloseWithCheckedOutConnection(t *testing.T) {
 func TestConnectionPool_GetCanceledContext(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 	pool.MaxNumConnections = 1
@@ -303,7 +303,7 @@ func TestConnectionPool_GetCanceledContext(t *testing.T) {
 func TestConnectionPool_CloseUnblocksWaiters(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 	pool.MaxNumConnections = 1
@@ -342,7 +342,7 @@ func TestConnectionPool_IdleEvictionOnGet(t *testing.T) {
 
 	var mu sync.Mutex
 	var created []*mockConnection
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		conn := &mockConnection{}
@@ -382,7 +382,7 @@ func TestConnectionPool_IdleEvictionOnGet(t *testing.T) {
 func TestConnectionPool_MaintainEvictsIdle(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 	pool.IdleTimeout = 20 * time.Millisecond // MinIdleConnections stays 0 → all surplus.
@@ -414,7 +414,7 @@ func TestConnectionPool_MaintainEvictsIdle(t *testing.T) {
 func TestConnectionPool_MaintainReplenishesWarm(t *testing.T) {
 	t.Parallel()
 
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 	pool.MinIdleConnections = 3
@@ -433,7 +433,7 @@ func TestConnectionPool_MaintainPingKeepsWarm(t *testing.T) {
 
 	var mu sync.Mutex
 	var pings int
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		return newMockConnection()
 	})
 	pool.MinIdleConnections = 1
@@ -481,7 +481,7 @@ func TestConnectionPool_MaintainPingFailureReplaces(t *testing.T) {
 
 	var mu sync.Mutex
 	var created []*mockConnection
-	pool := connection_pool.New(func() (*mockConnection, error) {
+	pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		conn := &mockConnection{}
@@ -515,5 +515,69 @@ func TestConnectionPool_MaintainPingFailureReplaces(t *testing.T) {
 	mu.Unlock()
 	if n != 2 {
 		t.Fatalf("expected a replacement to be dialed (2 created), got %d", n)
+	}
+}
+
+// A dial is part of the wait for a connection, so it ends when the caller's
+// context does rather than running to the dialer's own timeout.
+func TestConnectionPool_GetDialHonoursContext(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		context func(parent context.Context) (context.Context, context.CancelFunc)
+		wantErr error
+	}{
+		{
+			name: "deadline",
+			context: func(parent context.Context) (context.Context, context.CancelFunc) {
+				return context.WithTimeout(parent, 50*time.Millisecond)
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name: "cancel",
+			context: func(parent context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(parent)
+				time.AfterFunc(50*time.Millisecond, cancel)
+				return ctx, cancel
+			},
+			wantErr: context.Canceled,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			var dials int
+			pool := connection_pool.New(func(ctx context.Context) (*mockConnection, error) {
+				dials++
+				if dials == 1 {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return newMockConnection()
+			})
+			pool.MaxNumConnections = 1
+
+			ctx, cancel := testCase.context(t.Context())
+			defer cancel()
+
+			start := time.Now()
+			if _, err := pool.Get(ctx); !errors.Is(err, testCase.wantErr) {
+				t.Fatalf("Get error = %v; want %v", err, testCase.wantErr)
+			}
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("Get took %s; want it to end with its context", elapsed)
+			}
+
+			// The abandoned dial gave its slot back.
+			connection, err := pool.Get(t.Context())
+			if err != nil {
+				t.Fatalf("Get after an abandoned dial: %v", err)
+			}
+			pool.Put(t.Context(), connection, nil)
+		})
 	}
 }

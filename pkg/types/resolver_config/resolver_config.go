@@ -22,6 +22,11 @@ const (
 	// idle window to be effective. At 10s it raced Mullvad's ~10s close, so 5s.
 	// 0 disables pool maintenance entirely.
 	DefaultKeepAliveInterval = 5 * time.Second
+	// DefaultRequestTimeout bounds the handling of one request, upstream
+	// attempts and the wait for a pooled connection included. It sits below
+	// the 5s a stub resolver waits by default, so the client hears SERVFAIL
+	// rather than nothing.
+	DefaultRequestTimeout = 4 * time.Second
 )
 
 // Config holds tunable resolver settings. It is assembled from a set of
@@ -38,6 +43,8 @@ type Config struct {
 	// KeepAliveInterval is how often the pool's maintenance loop runs to ping
 	// the warm set and replenish it.
 	KeepAliveInterval time.Duration
+	// RequestTimeout bounds the handling of one request.
+	RequestTimeout time.Duration
 }
 
 // Option mutates a Config.
@@ -74,6 +81,13 @@ func WithKeepAliveInterval(keepAliveInterval time.Duration) Option {
 	}
 }
 
+// WithRequestTimeout sets how long the handling of one request may take.
+func WithRequestTimeout(requestTimeout time.Duration) Option {
+	return func(config *Config) {
+		config.RequestTimeout = requestTimeout
+	}
+}
+
 // New returns a Config populated with defaults, with the given Options applied
 // in order.
 func New(options ...Option) *Config {
@@ -82,6 +96,7 @@ func New(options ...Option) *Config {
 		IdleTimeout:        DefaultIdleTimeout,
 		MinIdleConnections: DefaultMinIdleConnections,
 		KeepAliveInterval:  DefaultKeepAliveInterval,
+		RequestTimeout:     DefaultRequestTimeout,
 	}
 	for _, option := range options {
 		if option != nil {

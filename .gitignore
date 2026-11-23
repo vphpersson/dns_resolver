@@ -2,6 +2,7 @@
 !/.dockerignore
 !/.gitignore
 !/dns_resolver.go
+!/dns_resolver_test.go
 !/Dockerfile
 !/go.mod
 !/go.sum
