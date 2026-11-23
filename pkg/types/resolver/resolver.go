@@ -226,6 +226,9 @@ func copyRecords(records []dns.RR, askedName string) []dns.RR {
 func buildReply(request *dns.Msg, answer *dns.Msg) *dns.Msg {
 	reply := new(dns.Msg)
 	reply.SetRcode(request, answer.Rcode)
+	// Compressed as the upstream sent it, a large answer fits the 64 KiB a
+	// TCP message may take; written out in full, it might not.
+	reply.Compress = true
 	reply.Authoritative = answer.Authoritative
 	reply.Truncated = answer.Truncated
 	reply.RecursionAvailable = true

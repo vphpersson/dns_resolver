@@ -403,3 +403,47 @@ func TestServeDNS_UdpReplySize(t *testing.T) {
 		})
 	}
 }
+
+// A large answer the upstream sent compressed must still fit when it is sent
+// on over TCP. The reply was packed without name compression, so an answer
+// that fitted the 64 KiB limit as the upstream sent it could not be packed
+// again, and the client got nothing.
+func TestServeDNS_LargeTcpReply(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		records int
+	}{
+		{name: "fits uncompressed", records: 1000},
+		{name: "fits only compressed", records: 3000},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := startUpstream(t, func(query *dns.Msg) *dns.Msg {
+				response := new(dns.Msg)
+				response.SetReply(query)
+				response.Compress = true
+				for i := range testCase.records {
+					response.Answer = append(response.Answer, &dns.A{
+						Hdr: dns.RR_Header{Name: query.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+						A:   net.IPv4(10, byte(i>>8), byte(i), 1).To4(),
+					})
+				}
+				return response
+			})
+			resolver := newTestResolver(t, upstream)
+
+			reply := ask(resolver, "tcp", newQuery("many.example.", dns.TypeA))
+			if reply == nil {
+				t.Fatal("no reply")
+			}
+			if reply.Rcode != dns.RcodeSuccess || len(reply.Answer) != testCase.records {
+				t.Fatalf("rcode = %s with %d answers; want NOERROR with %d", rcodeOf(reply), len(reply.Answer), testCase.records)
+			}
+		})
+	}
+}

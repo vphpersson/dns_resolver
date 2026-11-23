@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"dns_resolver/pkg/types/resolver_config"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -28,6 +29,8 @@ func TestMain(m *testing.M) {
 }
 
 const testServerName = "upstream.test"
+
+var errMessageTooLarge = errors.New("message too large")
 
 // answerFunc answers one query on behalf of the fake upstream. Returning nil
 // sends nothing back, which the resolver sees as a query that timed out.
@@ -223,6 +226,10 @@ func (w *testWriter) WriteMsg(m *dns.Msg) error {
 	packed, err := m.Pack()
 	if err != nil {
 		return err
+	}
+	// miekg/dns refuses to write a message over the 16-bit length limit.
+	if len(packed) > dns.MaxMsgSize {
+		return errMessageTooLarge
 	}
 	received := new(dns.Msg)
 	if err := received.Unpack(packed); err != nil {
