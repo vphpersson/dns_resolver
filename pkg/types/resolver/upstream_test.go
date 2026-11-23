@@ -222,21 +222,30 @@ func newTestResolver(t *testing.T, upstream *testUpstream, options ...resolver_c
 	return resolver
 }
 
-type testAddr struct{ network string }
+// testClient is the address a request comes from unless a test says another.
+const testClient = "192.0.2.7:5353"
+
+type testAddr struct{ network, address string }
 
 func (a testAddr) Network() string { return a.network }
-func (a testAddr) String() string  { return "192.0.2.7:5353" }
+func (a testAddr) String() string  { return a.address }
 
 // testWriter captures what ServeDNS writes back to the client, and the length
 // of each message as it went onto the wire.
 type testWriter struct {
 	network string
+	remote  string
 	msgs    []*dns.Msg
 	lengths []int
 }
 
-func (w *testWriter) LocalAddr() net.Addr  { return testAddr{w.network} }
-func (w *testWriter) RemoteAddr() net.Addr { return testAddr{w.network} }
+func (w *testWriter) LocalAddr() net.Addr { return testAddr{w.network, "127.0.0.1:53"} }
+func (w *testWriter) RemoteAddr() net.Addr {
+	if w.remote == "" {
+		return testAddr{w.network, testClient}
+	}
+	return testAddr{w.network, w.remote}
+}
 func (w *testWriter) WriteMsg(m *dns.Msg) error {
 	// What a client receives is the packed message; going through the wire
 	// format also catches a reply that cannot be packed at all.
@@ -273,6 +282,16 @@ func newQuery(name string, qtype uint16) *dns.Msg {
 func ask(r *Resolver, network string, query *dns.Msg) *dns.Msg {
 	reply, _ := askWire(r, network, query)
 	return reply
+}
+
+// askFrom is ask from the client at remote, an address and port.
+func askFrom(r *Resolver, network string, remote string, query *dns.Msg) *dns.Msg {
+	writer := &testWriter{network: network, remote: remote}
+	r.ServeDNS(writer, query)
+	if len(writer.msgs) == 0 {
+		return nil
+	}
+	return writer.msgs[len(writer.msgs)-1]
 }
 
 // askWire is ask, also returning the reply's length on the wire.

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -345,9 +346,12 @@ type Resolver struct {
 	RequestTimeout time.Duration
 	// forwardSlots bounds the requests waiting on the upstream at once.
 	forwardSlots chan struct{}
-	metrics      resolverMetrics
-	blocklistsMu sync.Mutex
-	blocklists   atomic.Pointer[blocklistSet]
+	// rejectionWarnings bounds how often one client's rejected requests are
+	// warned of.
+	rejectionWarnings *warningLimiter
+	metrics           resolverMetrics
+	blocklistsMu      sync.Mutex
+	blocklists        atomic.Pointer[blocklistSet]
 }
 
 // Metrics returns a snapshot of the resolver and cache counters.
@@ -645,6 +649,35 @@ func (r *Resolver) handleDoq(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 	return response, nil
 }
 
+// warnRejected warns that a request was refused, naming its client and
+// question through dnsContext. One client's refusals of one kind are warned of
+// at most once per interval, the next warning counting those held back, so a
+// flood of refused requests is not a flood of log lines too.
+func (r *Resolver) warnRejected(
+	ctx context.Context,
+	kind string,
+	client netip.Addr,
+	dnsContext *dnsUtilsTypes.DnsContext,
+	eventGroup slog.Attr,
+) {
+	attrs := []any{eventGroup}
+	if limiter := r.rejectionWarnings; limiter != nil {
+		allowed, suppressed := limiter.allow(kind + " " + client.String())
+		if !allowed {
+			return
+		}
+		if suppressed > 0 {
+			attrs = append(attrs, slog.Group(
+				"rate_limit",
+				slog.Int("suppressed", suppressed),
+				slog.Int("interval_s", int(limiter.interval.Seconds())),
+			))
+		}
+	}
+
+	slog.WarnContext(dnsUtilsContext.WithDnsContextValue(ctx, dnsContext), "", attrs...)
+}
+
 // blockingList returns the first blocklist, in name order, that blocks name,
 // or nil when none does.
 func (r *Resolver) blockingList(name string) Blocklist {
@@ -789,6 +822,20 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		dnsResolverServerAddress = localAddr.String()
 	}
 
+	client := clientAddress(remoteAddr)
+
+	// requestDnsContext describes the request alone, for an event about it
+	// that has no answer to show.
+	requestDnsContext := func() *dnsUtilsTypes.DnsContext {
+		return &dnsUtilsTypes.DnsContext{
+			Time:            new(time.Now()),
+			ClientAddress:   remoteAddrString,
+			ServerAddress:   dnsResolverServerAddress,
+			Transport:       transportProtocol,
+			QuestionMessage: loggable(request),
+		}
+	}
+
 	// Obtain a response.
 
 	question := requestQuestions[0]
@@ -799,16 +846,17 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	// UPDATE -- would otherwise be forwarded, and its reply cached as the
 	// answer to an ordinary query for the same name.
 	if request.Opcode != dns.OpcodeQuery {
-		slog.WarnContext(
+		r.warnRejected(
 			r.LifetimeContext,
-			"",
+			"opcode",
+			client,
+			requestDnsContext(),
 			makeEventGroup(
 				"dns_request_validate",
 				"The request's opcode is not supported.",
 				"failure",
 				"protocol", "denied",
 			),
-			slog.Group("dns", slog.String("op_code", dns.OpcodeToString[request.Opcode])),
 		)
 		r.metrics.responseOther.Add(1)
 		writeErrorResponse(responseWriter, request, dns.RcodeNotImplemented)
@@ -934,9 +982,11 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		// queue for a pooled connection; what the cache, the hosts file
 		// or a blocklist can answer is still answered.
 		if !r.acquireForwardSlot() {
-			slog.WarnContext(
-				ctxWithTlsDns,
-				"",
+			r.warnRejected(
+				requestCtx,
+				"overload",
+				client,
+				requestDnsContext(),
 				makeEventGroup(
 					"dns_request_forward",
 					"The limit on requests waiting on the upstream was reached.",
@@ -1185,6 +1235,7 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 	if config.MaxInFlight > 0 {
 		resolver.forwardSlots = make(chan struct{}, config.MaxInFlight)
 	}
+	resolver.rejectionWarnings = newWarningLimiter(defaultWarningInterval)
 
 	switch mode {
 	case "dot":
