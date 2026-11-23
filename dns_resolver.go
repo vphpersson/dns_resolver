@@ -184,6 +184,7 @@ func main() {
 	keepAliveIntervalString := resolver_config.DefaultKeepAliveInterval.String()
 	requestTimeoutString := resolver_config.DefaultRequestTimeout.String()
 	maxInFlight := resolver_config.DefaultMaxInFlight
+	maxInFlightPerClient := resolver_config.DefaultMaxInFlightPerClient
 	maxTcpConnections := defaultMaxTcpConnections
 	cacheMaxEntries := cache.DefaultMaxEntries
 	cacheMaxBytes := cache.DefaultMaxBytes
@@ -205,6 +206,7 @@ func main() {
 			option.NewStringOption('k', "keepalive-interval", "keep-alive ping interval for warm connections, e.g. 10s; 0 disables (dot mode)", false, &keepAliveIntervalString),
 			option.NewStringOption('t', "request-timeout", "time allowed to answer one request, upstream attempts included, e.g. 4s", false, &requestTimeoutString),
 			option.NewIntOption(0, "max-in-flight", "requests that may wait on the upstream at once; beyond it a request is answered SERVFAIL", false, &maxInFlight),
+			option.NewIntOption(0, "max-in-flight-per-client", "requests one client may have waiting on the upstream at once; beyond it its requests are answered SERVFAIL", false, &maxInFlightPerClient),
 			option.NewIntOption(0, "max-tcp-connections", "TCP client connections served at once", false, &maxTcpConnections),
 			option.NewIntOption(0, "cache-max-entries", "answers the cache holds at most; the least recently used go first", false, &cacheMaxEntries),
 			option.NewIntOption(0, "cache-max-bytes", "approximate memory the cached answers take at most, in bytes", false, &cacheMaxBytes),
@@ -262,6 +264,13 @@ func main() {
 		logger.FatalWithExitingMessage(
 			"The max in flight must be at least 1.",
 			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxInFlight, maxInFlight)),
+		)
+	}
+
+	if maxInFlightPerClient < 1 {
+		logger.FatalWithExitingMessage(
+			"The max in flight per client must be at least 1.",
+			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxInFlight, maxInFlightPerClient)),
 		)
 	}
 
@@ -350,6 +359,7 @@ func main() {
 		resolver_config.WithKeepAliveInterval(keepAliveInterval),
 		resolver_config.WithRequestTimeout(requestTimeout),
 		resolver_config.WithMaxInFlight(maxInFlight),
+		resolver_config.WithMaxInFlightPerClient(maxInFlightPerClient),
 		resolver_config.WithCacheMaxEntries(cacheMaxEntries),
 		resolver_config.WithCacheMaxBytes(cacheMaxBytes),
 	)

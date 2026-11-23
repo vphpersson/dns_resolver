@@ -305,23 +305,29 @@ type resolverMetrics struct {
 	upstreamErrors   atomic.Uint64
 	exchangeErrors   atomic.Uint64
 	overloadRejected atomic.Uint64
+	// clientOverloadRejected counts the requests refused for their client's
+	// own bound, apart from overloadRejected's global one.
+	clientOverloadRejected atomic.Uint64
 }
 
 // Metrics is a point-in-time snapshot of the resolver counters plus the cache
 // stats, serialised by the /metrics endpoint.
 type Metrics struct {
-	QueriesTotal     uint64      `json:"queries_total"`
-	ResponseNoerror  uint64      `json:"response_noerror"`
-	ResponseNxdomain uint64      `json:"response_nxdomain"`
-	ResponseServfail uint64      `json:"response_servfail"`
-	ResponseOther    uint64      `json:"response_other"`
-	Blocked          uint64      `json:"blocked"`
-	HostsAnswered    uint64      `json:"hosts_answered"`
-	LocalAnswered    uint64      `json:"local_answered"`
-	UpstreamErrors   uint64      `json:"upstream_errors"`
-	ExchangeErrors   uint64      `json:"exchange_errors"`
-	OverloadRejected uint64      `json:"overload_rejected"`
-	Cache            cache.Stats `json:"cache"`
+	QueriesTotal     uint64 `json:"queries_total"`
+	ResponseNoerror  uint64 `json:"response_noerror"`
+	ResponseNxdomain uint64 `json:"response_nxdomain"`
+	ResponseServfail uint64 `json:"response_servfail"`
+	ResponseOther    uint64 `json:"response_other"`
+	Blocked          uint64 `json:"blocked"`
+	HostsAnswered    uint64 `json:"hosts_answered"`
+	LocalAnswered    uint64 `json:"local_answered"`
+	UpstreamErrors   uint64 `json:"upstream_errors"`
+	ExchangeErrors   uint64 `json:"exchange_errors"`
+	OverloadRejected uint64 `json:"overload_rejected"`
+	// ClientOverloadRejected counts the requests refused because their
+	// client had its own bound of forwards in flight.
+	ClientOverloadRejected uint64      `json:"client_overload_rejected"`
+	Cache                  cache.Stats `json:"cache"`
 }
 
 type Resolver struct {
@@ -346,6 +352,9 @@ type Resolver struct {
 	RequestTimeout time.Duration
 	// forwardSlots bounds the requests waiting on the upstream at once.
 	forwardSlots chan struct{}
+	// clientForwards bounds the requests one client has waiting on the
+	// upstream at once.
+	clientForwards *clientSlots
 	// rejectionWarnings bounds how often one client's rejected requests are
 	// warned of.
 	rejectionWarnings *warningLimiter
@@ -357,17 +366,18 @@ type Resolver struct {
 // Metrics returns a snapshot of the resolver and cache counters.
 func (r *Resolver) Metrics() Metrics {
 	m := Metrics{
-		QueriesTotal:     r.metrics.queriesTotal.Load(),
-		ResponseNoerror:  r.metrics.responseNoerror.Load(),
-		ResponseNxdomain: r.metrics.responseNxdomain.Load(),
-		ResponseServfail: r.metrics.responseServfail.Load(),
-		ResponseOther:    r.metrics.responseOther.Load(),
-		Blocked:          r.metrics.blocked.Load(),
-		HostsAnswered:    r.metrics.hostsAnswered.Load(),
-		LocalAnswered:    r.metrics.localAnswered.Load(),
-		UpstreamErrors:   r.metrics.upstreamErrors.Load(),
-		ExchangeErrors:   r.metrics.exchangeErrors.Load(),
-		OverloadRejected: r.metrics.overloadRejected.Load(),
+		QueriesTotal:           r.metrics.queriesTotal.Load(),
+		ResponseNoerror:        r.metrics.responseNoerror.Load(),
+		ResponseNxdomain:       r.metrics.responseNxdomain.Load(),
+		ResponseServfail:       r.metrics.responseServfail.Load(),
+		ResponseOther:          r.metrics.responseOther.Load(),
+		Blocked:                r.metrics.blocked.Load(),
+		HostsAnswered:          r.metrics.hostsAnswered.Load(),
+		LocalAnswered:          r.metrics.localAnswered.Load(),
+		UpstreamErrors:         r.metrics.upstreamErrors.Load(),
+		ExchangeErrors:         r.metrics.exchangeErrors.Load(),
+		OverloadRejected:       r.metrics.overloadRejected.Load(),
+		ClientOverloadRejected: r.metrics.clientOverloadRejected.Load(),
 	}
 	if r.Cache != nil {
 		m.Cache = r.Cache.Stats()
@@ -981,6 +991,28 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 		// refused at once, rather than adding another goroutine to the
 		// queue for a pooled connection; what the cache, the hosts file
 		// or a blocklist can answer is still answered.
+		// One client may hold only so many of the slots, so that one keeping
+		// the upstream busy leaves room for the others.
+		if !r.clientForwards.acquire(client) {
+			r.warnRejected(
+				requestCtx,
+				"client overload",
+				client,
+				requestDnsContext(),
+				makeEventGroup(
+					"dns_request_forward",
+					"The client's limit on requests waiting on the upstream was reached.",
+					"failure",
+					"connection", "denied",
+				),
+			)
+			r.metrics.clientOverloadRejected.Add(1)
+			r.metrics.responseServfail.Add(1)
+			writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
+			return
+		}
+		defer r.clientForwards.release(client)
+
 		if !r.acquireForwardSlot() {
 			r.warnRejected(
 				requestCtx,
@@ -1234,6 +1266,9 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 	}
 	if config.MaxInFlight > 0 {
 		resolver.forwardSlots = make(chan struct{}, config.MaxInFlight)
+	}
+	if config.MaxInFlightPerClient > 0 {
+		resolver.clientForwards = newClientSlots(config.MaxInFlightPerClient)
 	}
 	resolver.rejectionWarnings = newWarningLimiter(defaultWarningInterval)
 

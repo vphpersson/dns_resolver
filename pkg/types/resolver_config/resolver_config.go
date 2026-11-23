@@ -31,6 +31,11 @@ const (
 	// Each holds a goroutine and, while it has one, a pooled connection; a
 	// request beyond the bound is answered SERVFAIL straight away.
 	DefaultMaxInFlight = 256
+	// DefaultMaxInFlightPerClient bounds the requests one client has waiting
+	// on the upstream at once, so that one client keeping the upstream busy
+	// leaves room for the rest. It sits well below the connection count the
+	// deploy uses.
+	DefaultMaxInFlightPerClient = 16
 )
 
 // Config holds tunable resolver settings. It is assembled from a set of
@@ -52,6 +57,9 @@ type Config struct {
 	// MaxInFlight bounds the requests waiting on the upstream at once; <= 0
 	// means no bound.
 	MaxInFlight int
+	// MaxInFlightPerClient bounds the requests one client has waiting on the
+	// upstream at once; <= 0 means no bound.
+	MaxInFlightPerClient int
 	// CacheMaxEntries and CacheMaxBytes bound the cache; <= 0 leaves the
 	// cache's own defaults in place.
 	CacheMaxEntries int
@@ -106,6 +114,14 @@ func WithMaxInFlight(maxInFlight int) Option {
 	}
 }
 
+// WithMaxInFlightPerClient sets how many requests one client may have
+// waiting on the upstream at once.
+func WithMaxInFlightPerClient(maxInFlightPerClient int) Option {
+	return func(config *Config) {
+		config.MaxInFlightPerClient = maxInFlightPerClient
+	}
+}
+
 // WithCacheMaxEntries bounds the number of cached answers.
 func WithCacheMaxEntries(cacheMaxEntries int) Option {
 	return func(config *Config) {
@@ -124,12 +140,13 @@ func WithCacheMaxBytes(cacheMaxBytes int) Option {
 // in order.
 func New(options ...Option) *Config {
 	config := &Config{
-		MaxConnections:     DefaultMaxConnections,
-		IdleTimeout:        DefaultIdleTimeout,
-		MinIdleConnections: DefaultMinIdleConnections,
-		KeepAliveInterval:  DefaultKeepAliveInterval,
-		RequestTimeout:     DefaultRequestTimeout,
-		MaxInFlight:        DefaultMaxInFlight,
+		MaxConnections:       DefaultMaxConnections,
+		IdleTimeout:          DefaultIdleTimeout,
+		MinIdleConnections:   DefaultMinIdleConnections,
+		KeepAliveInterval:    DefaultKeepAliveInterval,
+		RequestTimeout:       DefaultRequestTimeout,
+		MaxInFlight:          DefaultMaxInFlight,
+		MaxInFlightPerClient: DefaultMaxInFlightPerClient,
 	}
 	for _, option := range options {
 		if option != nil {

@@ -9,12 +9,13 @@ func TestNew(t *testing.T) {
 	t.Parallel()
 
 	defaults := Config{
-		MaxConnections:     DefaultMaxConnections,
-		IdleTimeout:        DefaultIdleTimeout,
-		MinIdleConnections: DefaultMinIdleConnections,
-		KeepAliveInterval:  DefaultKeepAliveInterval,
-		RequestTimeout:     DefaultRequestTimeout,
-		MaxInFlight:        DefaultMaxInFlight,
+		MaxConnections:       DefaultMaxConnections,
+		IdleTimeout:          DefaultIdleTimeout,
+		MinIdleConnections:   DefaultMinIdleConnections,
+		KeepAliveInterval:    DefaultKeepAliveInterval,
+		RequestTimeout:       DefaultRequestTimeout,
+		MaxInFlight:          DefaultMaxInFlight,
+		MaxInFlightPerClient: DefaultMaxInFlightPerClient,
 	}
 
 	testCases := []struct {
@@ -33,19 +34,21 @@ func TestNew(t *testing.T) {
 				WithKeepAliveInterval(3 * time.Second),
 				WithRequestTimeout(4 * time.Second),
 				WithMaxInFlight(5),
+				WithMaxInFlightPerClient(9),
 				WithCacheMaxEntries(6),
 				WithCacheMaxBytes(7),
 			},
 			want: func() Config {
 				return Config{
-					MaxConnections:     64,
-					IdleTimeout:        time.Second,
-					MinIdleConnections: 2,
-					KeepAliveInterval:  3 * time.Second,
-					RequestTimeout:     4 * time.Second,
-					MaxInFlight:        5,
-					CacheMaxEntries:    6,
-					CacheMaxBytes:      7,
+					MaxConnections:       64,
+					IdleTimeout:          time.Second,
+					MinIdleConnections:   2,
+					KeepAliveInterval:    3 * time.Second,
+					RequestTimeout:       4 * time.Second,
+					MaxInFlight:          5,
+					MaxInFlightPerClient: 9,
+					CacheMaxEntries:      6,
+					CacheMaxBytes:        7,
 				}
 			},
 		},
