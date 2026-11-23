@@ -608,6 +608,74 @@ func (r *Resolver) handleDoq(ctx context.Context, request *dns.Msg) (*dns.Msg, e
 	return response, nil
 }
 
+// blockingList returns the first blocklist, in name order, that blocks name,
+// or nil when none does.
+func (r *Resolver) blockingList(name string) Blocklist {
+	for _, blocklist := range r.Blocklists() {
+		if blocklist.IsBlocked(name) {
+			return blocklist
+		}
+	}
+	return nil
+}
+
+// blockedTarget returns the first blocklist blocking a name that answer's CNAME
+// or DNAME records lead to, and that name.
+func (r *Resolver) blockedTarget(answer *dns.Msg) (Blocklist, string) {
+	for _, record := range answer.Answer {
+		var target string
+		switch typedRecord := record.(type) {
+		case *dns.CNAME:
+			target = typedRecord.Target
+		case *dns.DNAME:
+			target = typedRecord.Target
+		default:
+			continue
+		}
+		if blocklist := r.blockingList(target); blocklist != nil {
+			return blocklist, target
+		}
+	}
+	return nil, ""
+}
+
+// logBlocked records that blocklist blocked a request for matchedName, which
+// is the question's name or one its answer leads to.
+func (r *Resolver) logBlocked(ctx context.Context, blocklist Blocklist, reason string, matchedName string) {
+	var args []any
+	if rule := blocklist.GetRule(); rule != nil {
+		ruleMap, err := altshiftJson.ObjectToMap(rule)
+		if err != nil {
+			slog.ErrorContext(
+				altshiftContext.WithError(ctx, err),
+				"",
+				makeEventGroup(
+					"rule_serialize",
+					"An error occurred when converting a rule to a map.",
+					"failure",
+					"error",
+				),
+			)
+		} else {
+			args = log.AttrsFromMap(ruleMap)
+		}
+	}
+
+	slog.With(
+		slog.Group("rule", args...),
+	).WarnContext(
+		ctx,
+		"",
+		makeEventGroup(
+			"dns_request_block",
+			reason,
+			"success",
+			"connection", "protocol", "denied",
+		),
+		slog.Group("blocklist", slog.String("matched_name", strings.TrimSuffix(matchedName, "."))),
+	)
+}
+
 func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg) {
 	if request == nil {
 		slog.WarnContext(
@@ -702,14 +770,50 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 	requestCtx, cancelRequest := context.WithTimeout(r.LifetimeContext, requestTimeout)
 	defer cancelRequest()
 
-	var response *dns.Msg
 	do := requestDO(request)
 	cacheKey := getCacheKey(question, do, request.CheckingDisabled)
-	response, cacheHit, remainingTtl := r.Cache.Get(cacheKey)
-	if !cacheHit || response == nil {
-		if r.Hosts != nil {
-			if hostsResponse := r.Hosts.Resolve(request); hostsResponse != nil {
-				ctxWithDns := dnsUtilsContext.WithDnsContextValue(
+
+	// The hosts file and the blocklists are consulted before the cache, so that
+	// a change to either applies at once rather than once the cached answer
+	// expires.
+	var response *dns.Msg
+	var cacheHit, forwarded bool
+	var remainingTtl time.Duration
+
+	if r.Hosts != nil {
+		if hostsResponse := r.Hosts.Resolve(request); hostsResponse != nil {
+			ctxWithDns := dnsUtilsContext.WithDnsContextValue(
+				r.LifetimeContext,
+				&dnsUtilsTypes.DnsContext{
+					Time:            new(time.Now()),
+					ClientAddress:   remoteAddrString,
+					ServerAddress:   dnsResolverServerAddress,
+					Transport:       transportProtocol,
+					QuestionMessage: request,
+					AnswerMessage:   hostsResponse,
+				},
+			)
+
+			slog.InfoContext(
+				ctxWithDns,
+				"",
+				makeEventGroup(
+					"dns_request_hosts",
+					"A DNS request was answered from the hosts file.",
+					"success",
+					"connection", "protocol", "info",
+				),
+			)
+
+			r.metrics.hostsAnswered.Add(1)
+			response = hostsResponse
+		}
+	}
+
+	if response == nil {
+		if blocklist := r.blockingList(question.Name); blocklist != nil {
+			r.logBlocked(
+				dnsUtilsContext.WithDnsContextValue(
 					r.LifetimeContext,
 					&dnsUtilsTypes.DnsContext{
 						Time:            new(time.Now()),
@@ -717,178 +821,142 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 						ServerAddress:   dnsResolverServerAddress,
 						Transport:       transportProtocol,
 						QuestionMessage: request,
-						AnswerMessage:   hostsResponse,
 					},
-				)
-
-				slog.InfoContext(
-					ctxWithDns,
-					"",
-					makeEventGroup(
-						"dns_request_hosts",
-						"A DNS request was answered from the hosts file.",
-						"success",
-						"connection", "protocol", "info",
-					),
-				)
-
-				r.metrics.hostsAnswered.Add(1)
-				response = hostsResponse
-			}
+				),
+				blocklist,
+				"A DNS request was blocked by a blocklist.",
+				question.Name,
+			)
+			r.metrics.blocked.Add(1)
+			response = makeBlockedResponse(request)
 		}
+	}
 
-		if response == nil {
-			var blockedByAnyList bool
-			for _, blocklist := range r.Blocklists() {
-				if !blocklist.IsBlocked(question.Name) {
-					continue
-				}
-				blockedByAnyList = true
-
-				ctxWithDns := dnsUtilsContext.WithDnsContextValue(
-					r.LifetimeContext,
-					&dnsUtilsTypes.DnsContext{
-						Time:            new(time.Now()),
-						ClientAddress:   remoteAddrString,
-						ServerAddress:   dnsResolverServerAddress,
-						Transport:       transportProtocol,
-						QuestionMessage: request,
-					},
-				)
-
-				var args []any
-
-				if rule := blocklist.GetRule(); rule != nil {
-					ruleMap, err := altshiftJson.ObjectToMap(rule)
-					if err != nil {
-						slog.ErrorContext(
-							altshiftContext.WithError(ctxWithDns, err),
-							"",
-							makeEventGroup(
-								"rule_serialize",
-								"An error occurred when converting a rule to a map.",
-								"failure",
-								"error",
-							),
-						)
-					} else {
-						args = log.AttrsFromMap(ruleMap)
-					}
-				}
-
-				slog.With(
-					slog.Group("rule", args...),
-				).WarnContext(
-					ctxWithDns,
-					"",
-					makeEventGroup(
-						"dns_request_block",
-						"A DNS request was blocked by a blocklist.",
-						"success",
-						"connection", "protocol", "denied",
-					),
-				)
-				break
-			}
-
-			if blockedByAnyList {
-				r.metrics.blocked.Add(1)
-				response = makeBlockedResponse(request)
-			}
+	if response == nil {
+		response, cacheHit, remainingTtl = r.Cache.Get(cacheKey)
+		if !cacheHit {
+			response = nil
 		}
+	}
 
-		if response == nil {
-			var dnsContext dnsUtilsTypes.DnsContext
-			ctxWithTlsDns := altshiftTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(requestCtx, &dnsContext))
+	if response == nil {
+		var dnsContext dnsUtilsTypes.DnsContext
+		ctxWithTlsDns := altshiftTlsContext.WithTlsContext(dnsUtilsContext.WithDnsContextValue(requestCtx, &dnsContext))
 
-			query := newUpstreamQuery(question, do, request.CheckingDisabled)
+		query := newUpstreamQuery(question, do, request.CheckingDisabled)
 
-			// A request waiting on the upstream holds a slot until it is
-			// answered or its deadline passes. With every slot taken it is
-			// refused at once, rather than adding another goroutine to the
-			// queue for a pooled connection; what the cache, the hosts file
-			// or a blocklist can answer is still answered.
-			if !r.acquireForwardSlot() {
-				slog.WarnContext(
+		// A request waiting on the upstream holds a slot until it is
+		// answered or its deadline passes. With every slot taken it is
+		// refused at once, rather than adding another goroutine to the
+		// queue for a pooled connection; what the cache, the hosts file
+		// or a blocklist can answer is still answered.
+		if !r.acquireForwardSlot() {
+			slog.WarnContext(
+				ctxWithTlsDns,
+				"",
+				makeEventGroup(
+					"dns_request_forward",
+					"The limit on requests waiting on the upstream was reached.",
+					"failure",
+					"connection", "denied",
+				),
+			)
+			r.metrics.overloadRejected.Add(1)
+			r.metrics.responseServfail.Add(1)
+			writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
+			return
+		}
+		defer r.releaseForwardSlot()
+
+		var err error
+		response, err = r.forward(ctxWithTlsDns, query)
+
+		if err != nil {
+			slog.ErrorContext(
+				altshiftContext.WithError(
 					ctxWithTlsDns,
-					"",
-					makeEventGroup(
-						"dns_request_forward",
-						"The limit on requests waiting on the upstream was reached.",
-						"failure",
-						"connection", "denied",
-					),
-				)
-				r.metrics.overloadRejected.Add(1)
-				r.metrics.responseServfail.Add(1)
-				writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
-				return
-			}
-			defer r.releaseForwardSlot()
+					altshiftErrors.New(fmt.Errorf("handle: %w", err), query),
+				),
+				"",
+				makeEventGroup(
+					"dns_request_forward",
+					"An error occurred when handling a request.",
+					"failure",
+					"connection", "protocol", "error",
+				),
+			)
+			r.metrics.upstreamErrors.Add(1)
+			r.metrics.responseServfail.Add(1)
+			writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
+			return
+		}
 
-			var err error
-			response, err = r.forward(ctxWithTlsDns, query)
+		if response != nil {
+			slog.InfoContext(
+				ctxWithTlsDns,
+				"",
+				makeEventGroup(
+					"dns_request_forward",
+					"A DNS request was forwarded.",
+					"success",
+					"connection", "protocol", "info",
+				),
+			)
 
-			if err != nil {
-				slog.ErrorContext(
-					altshiftContext.WithError(
+			if do {
+				if response.Rcode == dns.RcodeServerFailure {
+					slog.WarnContext(
 						ctxWithTlsDns,
-						altshiftErrors.New(fmt.Errorf("handle: %w", err), query),
-					),
-					"",
-					makeEventGroup(
-						"dns_request_forward",
-						"An error occurred when handling a request.",
-						"failure",
-						"connection", "protocol", "error",
-					),
-				)
-				r.metrics.upstreamErrors.Add(1)
-				r.metrics.responseServfail.Add(1)
-				writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
-				return
-			}
-
-			if response != nil {
-				slog.InfoContext(
-					ctxWithTlsDns,
-					"",
-					makeEventGroup(
-						"dns_request_forward",
-						"A DNS request was forwarded.",
-						"success",
-						"connection", "protocol", "info",
-					),
-				)
-
-				if do {
-					if response.Rcode == dns.RcodeServerFailure {
-						slog.WarnContext(
-							ctxWithTlsDns,
-							"",
-							makeEventGroup(
-								"dnssec_validation",
-								"The upstream returned SERVFAIL for a DNSSEC-enabled query.",
-								"failure",
-								"connection", "protocol", "error",
-							),
-						)
-					} else if response.AuthenticatedData {
-						slog.InfoContext(
-							ctxWithTlsDns,
-							"",
-							makeEventGroup(
-								"dnssec_validation",
-								"The upstream authenticated the response (AD=1).",
-								"success",
-								"connection", "protocol", "info",
-							),
-						)
-					}
+						"",
+						makeEventGroup(
+							"dnssec_validation",
+							"The upstream returned SERVFAIL for a DNSSEC-enabled query.",
+							"failure",
+							"connection", "protocol", "error",
+						),
+					)
+				} else if response.AuthenticatedData {
+					slog.InfoContext(
+						ctxWithTlsDns,
+						"",
+						makeEventGroup(
+							"dnssec_validation",
+							"The upstream authenticated the response (AD=1).",
+							"success",
+							"connection", "protocol", "info",
+						),
+					)
 				}
-
-				r.Cache.Set(cacheKey, response, dnsContext.Time)
 			}
+
+			r.Cache.Set(cacheKey, response, dnsContext.Time)
+			forwarded = true
+		}
+	}
+
+	// An answer can lead to a name of its own through CNAME or DNAME records,
+	// which is how a tracker is put behind a first-party name. Checked here
+	// rather than when the answer was cached, a name listed since is caught.
+	if response != nil && (cacheHit || forwarded) {
+		if blocklist, target := r.blockedTarget(response); blocklist != nil {
+			r.logBlocked(
+				dnsUtilsContext.WithDnsContextValue(
+					r.LifetimeContext,
+					&dnsUtilsTypes.DnsContext{
+						Time:            new(time.Now()),
+						ClientAddress:   remoteAddrString,
+						ServerAddress:   dnsResolverServerAddress,
+						Transport:       transportProtocol,
+						QuestionMessage: request,
+					},
+				),
+				blocklist,
+				"A name the answer leads to was blocked by a blocklist.",
+				target,
+			)
+			r.metrics.blocked.Add(1)
+			response = makeBlockedResponse(request)
+			cacheHit = false
 		}
 	}
 
