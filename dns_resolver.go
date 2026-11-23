@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,7 +92,17 @@ func newDnsServer(ctx context.Context, address string, network string, handler d
 		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("%w: %s", errUnsupportedNetwork, network), address)
 	}
 
-	context.AfterFunc(ctx, func() { _ = socket.Close() })
+	context.AfterFunc(ctx, func() {
+		// Shutdown also ends the connections already accepted, which closing the
+		// listening socket alone leaves to their clients: an open TCP connection
+		// would hold the exit for its idle timeout, or for as long as its client
+		// keeps querying. Closing the socket covers a server not started yet,
+		// which Shutdown refuses.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dnsShutdownTimeout)
+		defer cancel()
+		_ = server.ShutdownContext(shutdownCtx)
+		_ = socket.Close()
+	})
 
 	return server, nil
 }
@@ -135,12 +147,53 @@ func serveDns(ctx context.Context, addresses []string, handler dns.Handler, maxT
 	return nil
 }
 
+// interfaceAddresses is an interface's name and index, which a zone names, and
+// the addresses it has.
+type interfaceAddresses struct {
+	name      string
+	index     int
+	addresses []netip.Addr
+}
+
+// collectInterfaceAddresses returns every interface with its addresses.
+func collectInterfaceAddresses() ([]*interfaceAddresses, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("net interfaces: %w", err))
+	}
+
+	collected := make([]*interfaceAddresses, 0, len(interfaces))
+	for _, networkInterface := range interfaces {
+		addrs, err := networkInterface.Addrs()
+		if err != nil {
+			return nil, altshiftErrors.NewWithTrace(fmt.Errorf("interface addrs: %w", err), networkInterface.Name)
+		}
+
+		entry := &interfaceAddresses{name: networkInterface.Name, index: networkInterface.Index}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch typed := addr.(type) {
+			case *net.IPNet:
+				ip = typed.IP
+			case *net.IPAddr:
+				ip = typed.IP
+			}
+			if address, ok := netip.AddrFromSlice(ip); ok {
+				entry.addresses = append(entry.addresses, address.Unmap())
+			}
+		}
+		collected = append(collected, entry)
+	}
+
+	return collected, nil
+}
+
 // unassignedAddresses returns the listen addresses whose host is an address no
-// interface has: free binding binds them all the same, so without a word they
-// would look like listeners while receiving nothing until the interface comes
-// up, or ever, for a mistyped one. A wildcard host, or one that is not an
-// address, is not reported.
-func unassignedAddresses(listenAddresses []string, interfaceAddresses []net.Addr) []string {
+// interface has, or none of those its zone names: free binding binds them all
+// the same, so without a word they would look like listeners while receiving
+// nothing until the interface comes up, or ever, for a mistyped one. A wildcard
+// host, or one that is not an address, is not reported.
+func unassignedAddresses(listenAddresses []string, interfaces []*interfaceAddresses) []string {
 	var unassigned []string
 	for _, listenAddress := range listenAddresses {
 		host, _, err := net.SplitHostPort(listenAddress)
@@ -151,12 +204,18 @@ func unassignedAddresses(listenAddresses []string, interfaceAddresses []net.Addr
 		if err != nil || address.IsUnspecified() {
 			continue
 		}
-		address = address.Unmap()
+		zone := address.Zone()
+		address = address.WithZone("").Unmap()
 
 		assigned := false
-		for _, interfaceAddress := range interfaceAddresses {
-			prefix, err := netip.ParsePrefix(interfaceAddress.String())
-			if err == nil && prefix.Addr().Unmap() == address.WithZone("") {
+		for _, networkInterface := range interfaces {
+			if networkInterface == nil {
+				continue
+			}
+			if zone != "" && zone != networkInterface.name && zone != strconv.Itoa(networkInterface.index) {
+				continue
+			}
+			if slices.Contains(networkInterface.addresses, address) {
 				assigned = true
 				break
 			}
@@ -194,6 +253,9 @@ const (
 	dnsWriteTimeout   = 2 * time.Second
 	dnsTcpIdleTimeout = 8 * time.Second
 	dnsMaxTcpQueries  = 128
+	// dnsShutdownTimeout bounds the wait for a server's queries in progress
+	// when it is shut down.
+	dnsShutdownTimeout = 5 * time.Second
 	// defaultMaxTcpConnections bounds the TCP connections served at once. A
 	// connection over the bound waits in the listen backlog for a free one.
 	defaultMaxTcpConnections = 128
@@ -558,12 +620,18 @@ func main() {
 				WriteTimeout:      diagnosticsWriteTimeout,
 				IdleTimeout:       diagnosticsIdleTimeout,
 			}
+			// Bound as the DNS servers are, so an address whose interface is not
+			// up yet does not fail the start.
+			listener, err := listenConfig.Listen(errGroupCtx, "tcp", infoAddress)
+			if err != nil {
+				return altshiftErrors.NewWithTrace(fmt.Errorf("listen config listen: %w", err), infoAddress)
+			}
 			// Shut the diagnostic server down when the group context ends so it
 			// does not keep the process alive after the DNS servers exit.
 			context.AfterFunc(errGroupCtx, func() { _ = server.Close() })
-			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				return altshiftErrors.NewWithTrace(
-					fmt.Errorf("diagnostics http server listen and serve: %w", err),
+					fmt.Errorf("diagnostics http server serve: %w", err),
 					infoAddress,
 				)
 			}
@@ -571,8 +639,26 @@ func main() {
 		})
 	}
 
-	if interfaceAddresses, err := net.InterfaceAddrs(); err == nil {
-		for _, listenAddress := range unassignedAddresses(listenAddresses, interfaceAddresses) {
+	boundAddresses := listenAddresses
+	if infoAddress != "" {
+		boundAddresses = append(slices.Clone(listenAddresses), infoAddress)
+	}
+	if interfaces, err := collectInterfaceAddresses(); err != nil {
+		slog.WarnContext(
+			altshiftContext.WithError(errGroupCtx, err),
+			"",
+			slog.Group(
+				"event",
+				slog.String("action", "listen"),
+				slog.String("reason", "The interfaces' addresses could not be listed, so an address listened on that no interface has goes unreported."),
+				slog.String("kind", "event"),
+				slog.String("outcome", "failure"),
+				slog.Any("category", []string{"network"}),
+				slog.Any("type", []string{"error"}),
+			),
+		)
+	} else {
+		for _, boundAddress := range unassignedAddresses(boundAddresses, interfaces) {
 			slog.WarnContext(
 				errGroupCtx,
 				"",
@@ -585,7 +671,7 @@ func main() {
 					slog.Any("category", []string{"network"}),
 					slog.Any("type", []string{"start"}),
 				),
-				slog.Group("server", slog.String("address", listenAddress)),
+				slog.Group("server", slog.String("address", boundAddress)),
 			)
 		}
 	}

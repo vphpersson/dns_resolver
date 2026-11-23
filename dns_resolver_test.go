@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"runtime"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -151,20 +153,35 @@ func answerAll() dns.Handler {
 	})
 }
 
-// freeUdpAddress returns a loopback address whose UDP port was free a moment ago.
-func freeUdpAddress(t *testing.T) string {
+// freeAddress returns a loopback address whose port was free for both UDP and
+// TCP a moment ago, as serveDns binds both: a port free for UDP alone may be
+// held on TCP, by a client connection of a test running alongside.
+func freeAddress(t *testing.T) string {
 	t.Helper()
 
 	var listenConfig net.ListenConfig
-	packetConn, err := listenConfig.ListenPacket(t.Context(), "udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen packet: %v", err)
+	for range 20 {
+		listener, err := listenConfig.Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		listenerAddr := listener.Addr()
+		if listenerAddr == nil {
+			t.Fatal("listener has no address")
+		}
+		address := listenerAddr.String()
+
+		packetConn, err := listenConfig.ListenPacket(t.Context(), "udp", address)
+		_ = listener.Close()
+		if err != nil {
+			continue
+		}
+		_ = packetConn.Close()
+		return address
 	}
-	address := localAddress(t, packetConn)
-	if err := packetConn.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	return address
+
+	t.Fatal("found no port free for both udp and tcp")
+	return ""
 }
 
 // localAddress returns the address packetConn is bound to.
@@ -206,7 +223,7 @@ func TestServeDns_FailureEndsEveryServer(t *testing.T) {
 	}
 	defer busy.Close()
 
-	addresses := []string{freeUdpAddress(t), localAddress(t, busy)}
+	addresses := []string{freeAddress(t), localAddress(t, busy)}
 	done := make(chan error, 1)
 	go func() { done <- serveDns(t.Context(), addresses, answerAll(), 4) }()
 
@@ -236,7 +253,7 @@ func TestServeDns_ContextEndStopsServers(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 
-			address := freeUdpAddress(t)
+			address := freeAddress(t)
 			done := make(chan error, 1)
 			if !testCase.serveFirst {
 				cancel()
@@ -266,14 +283,73 @@ func TestServeDns_ContextEndStopsServers(t *testing.T) {
 	}
 }
 
+// Ending the servers ends the TCP connections they had accepted too. Closing
+// only the listening socket left an open connection served until its client
+// went: an idle one held the exit for the idle timeout, and one that kept
+// querying for as long as it did.
+func TestServeDns_OpenTcpConnectionDoesNotHoldTheExit(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	address := freeAddress(t)
+	done := make(chan error, 1)
+	go func() { done <- serveDns(ctx, []string{address}, answerAll(), 4) }()
+
+	var dialer net.Dialer
+	var connection net.Conn
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var err error
+		connection, err = dialer.DialContext(t.Context(), "tcp", address)
+		if err == nil {
+			err = exchangeOn(connection, 500*time.Millisecond)
+			if err == nil {
+				break
+			}
+			_ = connection.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the tcp server never answered: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	defer connection.Close()
+
+	cancel()
+	if err := waitForServeDns(t, done, dnsTcpIdleTimeout/4); err != nil {
+		t.Fatalf("error %v, want none", err)
+	}
+}
+
+func TestCollectInterfaceAddresses(t *testing.T) {
+	t.Parallel()
+
+	interfaces, err := collectInterfaceAddresses()
+	if err != nil {
+		t.Fatalf("collect interface addresses: %v", err)
+	}
+
+	loopback := netip.MustParseAddr("127.0.0.1")
+	for _, networkInterface := range interfaces {
+		if slices.Contains(networkInterface.addresses, loopback) {
+			if networkInterface.name == "" || networkInterface.index == 0 {
+				t.Errorf("loopback interface without a name or index: %+v", networkInterface)
+			}
+			return
+		}
+	}
+	t.Errorf("no interface has %s: %+v", loopback, interfaces)
+}
+
 func TestUnassignedAddresses(t *testing.T) {
 	t.Parallel()
 
-	interfaceAddresses := []net.Addr{
-		&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)},
-		&net.IPNet{IP: net.ParseIP("192.168.2.1"), Mask: net.CIDRMask(24, 32)},
-		&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)},
-		&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+	interfaces := []*interfaceAddresses{
+		{name: "lo", index: 1, addresses: []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")}},
+		{name: "eth0", index: 2, addresses: []netip.Addr{netip.MustParseAddr("192.168.2.1"), netip.MustParseAddr("fe80::1")}},
+		{name: "eth1", index: 3},
 	}
 
 	testCases := []struct {
@@ -285,7 +361,10 @@ func TestUnassignedAddresses(t *testing.T) {
 		{name: "loopback", listenAddress: "127.0.0.1:53"},
 		{name: "ipv6 loopback", listenAddress: "[::1]:53"},
 		{name: "an ipv4-mapped address an interface has", listenAddress: "[::ffff:192.168.2.1]:53"},
-		{name: "a link-local address with its zone", listenAddress: "[fe80::1%eth0]:53"},
+		{name: "a link-local address on the interface its zone names", listenAddress: "[fe80::1%eth0]:53"},
+		{name: "a link-local address on the interface its zone numbers", listenAddress: "[fe80::1%2]:53"},
+		{name: "a link-local address on another interface than its zone names", listenAddress: "[fe80::1%eth1]:53", wantReported: true},
+		{name: "a link-local address on another interface than its zone numbers", listenAddress: "[fe80::1%3]:53", wantReported: true},
 		{name: "an address no interface has", listenAddress: "192.168.3.1:53", wantReported: true},
 		{name: "another address in an interface's subnet", listenAddress: "192.168.2.7:53", wantReported: true},
 		{name: "an ipv6 address no interface has", listenAddress: "[2001:db8::53]:53", wantReported: true},
@@ -300,7 +379,7 @@ func TestUnassignedAddresses(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			reported := len(unassignedAddresses([]string{testCase.listenAddress}, interfaceAddresses)) == 1
+			reported := len(unassignedAddresses([]string{testCase.listenAddress}, interfaces)) == 1
 			if reported != testCase.wantReported {
 				t.Errorf("reported %t, want %t", reported, testCase.wantReported)
 			}
