@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"dns_resolver/pkg/free_bind"
 	"dns_resolver/pkg/types/abp_blocklist"
 	"dns_resolver/pkg/types/cache"
 	"dns_resolver/pkg/types/hosts"
@@ -9,9 +10,11 @@ import (
 	"dns_resolver/pkg/types/resolver_config"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -44,10 +47,18 @@ var (
 	errNonPositiveDuration       = errors.New("non-positive duration")
 )
 
+// errUnsupportedNetwork is a transport newDnsServer cannot serve.
+var errUnsupportedNetwork = errors.New("unsupported network")
+
+// listenConfig opens every listener with free binding, so an address whose
+// interface is not up yet binds rather than failing the start.
+var listenConfig = net.ListenConfig{Control: free_bind.Control}
+
 // newDnsServer makes a DNS server for one address and transport ("udp" or
-// "tcp"). TCP connections are served at most maxTcpConnections at a time, as
-// each holds a goroutine and a descriptor for as long as its client keeps it
-// open; the descriptors are the ones the upstream dials need too.
+// "tcp"), on a socket of its own that is closed when ctx ends, which is what
+// makes serve return. TCP connections are served at most maxTcpConnections at a
+// time, as each holds a goroutine and a descriptor for as long as its client
+// keeps it open; the descriptors are the ones the upstream dials need too.
 func newDnsServer(ctx context.Context, address string, network string, handler dns.Handler, maxTcpConnections int) (*dns.Server, error) {
 	server := &dns.Server{
 		Addr:          address,
@@ -58,32 +69,103 @@ func newDnsServer(ctx context.Context, address string, network string, handler d
 		IdleTimeout:   func() time.Duration { return dnsTcpIdleTimeout },
 		MaxTCPQueries: dnsMaxTcpQueries,
 	}
-	if network != "tcp" {
-		return server, nil
+
+	var socket io.Closer
+	switch network {
+	case "udp":
+		packetConn, err := listenConfig.ListenPacket(ctx, "udp", address)
+		if err != nil {
+			return nil, altshiftErrors.NewWithTrace(fmt.Errorf("listen config listen packet: %w", err), address)
+		}
+		server.PacketConn = packetConn
+		socket = packetConn
+	case "tcp":
+		listener, err := listenConfig.Listen(ctx, "tcp", address)
+		if err != nil {
+			return nil, altshiftErrors.NewWithTrace(fmt.Errorf("listen config listen: %w", err), address)
+		}
+		server.Listener = netutil.LimitListener(listener, maxTcpConnections)
+		socket = server.Listener
+	default:
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("%w: %s", errUnsupportedNetwork, network), address)
 	}
 
-	var listenConfig net.ListenConfig
-	listener, err := listenConfig.Listen(ctx, "tcp", address)
-	if err != nil {
-		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("listen config listen: %w", err), address)
-	}
-	server.Listener = netutil.LimitListener(listener, maxTcpConnections)
+	context.AfterFunc(ctx, func() { _ = socket.Close() })
+
 	return server, nil
 }
 
-// serve runs server until it fails, on the listener newDnsServer made for it
-// when there is one.
+// serve runs server on the socket newDnsServer opened for it, until the socket
+// fails or is closed.
 func serve(server *dns.Server) error {
-	if server.Listener != nil {
-		if err := server.ActivateAndServe(); err != nil {
-			return fmt.Errorf("dns server activate and serve: %w", err)
-		}
-		return nil
-	}
-	if err := server.ListenAndServe(); err != nil {
-		return fmt.Errorf("dns server listen and serve: %w", err)
+	if err := server.ActivateAndServe(); err != nil {
+		return fmt.Errorf("dns server activate and serve: %w", err)
 	}
 	return nil
+}
+
+// serveDns serves handler on every address over UDP and TCP until ctx ends or
+// one of the servers fails. A failure closes every other server's socket and is
+// returned, so the process exits and its supervisor starts it again: the servers
+// left running would otherwise go on answering with a handler whose context had
+// ended, which is to say with SERVFAIL, and nothing would restart them.
+func serveDns(ctx context.Context, addresses []string, handler dns.Handler, maxTcpConnections int) error {
+	group, groupCtx := errgroup.WithContext(ctx)
+	for _, address := range addresses {
+		for _, network := range []string{"udp", "tcp"} {
+			group.Go(func() error {
+				server, err := newDnsServer(groupCtx, address, network, handler, maxTcpConnections)
+				if err != nil {
+					return altshiftErrors.New(fmt.Errorf("new dns server (%s): %w", network, err), address)
+				}
+				// Once the group's context has ended, the socket was closed on
+				// purpose, and whatever ended it is the error worth reporting.
+				if err := serve(server); err != nil && groupCtx.Err() == nil {
+					return altshiftErrors.NewWithTrace(fmt.Errorf("serve (%s): %w", network, err), address)
+				}
+				return nil
+			})
+		}
+	}
+
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("errgroup wait: %w", err)
+	}
+
+	return nil
+}
+
+// unassignedAddresses returns the listen addresses whose host is an address no
+// interface has: free binding binds them all the same, so without a word they
+// would look like listeners while receiving nothing until the interface comes
+// up, or ever, for a mistyped one. A wildcard host, or one that is not an
+// address, is not reported.
+func unassignedAddresses(listenAddresses []string, interfaceAddresses []net.Addr) []string {
+	var unassigned []string
+	for _, listenAddress := range listenAddresses {
+		host, _, err := net.SplitHostPort(listenAddress)
+		if err != nil {
+			continue
+		}
+		address, err := netip.ParseAddr(host)
+		if err != nil || address.IsUnspecified() {
+			continue
+		}
+		address = address.Unmap()
+
+		assigned := false
+		for _, interfaceAddress := range interfaceAddresses {
+			prefix, err := netip.ParsePrefix(interfaceAddress.String())
+			if err == nil && prefix.Addr().Unmap() == address.WithZone("") {
+				assigned = true
+				break
+			}
+		}
+		if !assigned {
+			unassigned = append(unassigned, listenAddress)
+		}
+	}
+	return unassigned
 }
 
 // parseDuration parses a duration flag value. A negative value is refused, and
@@ -489,28 +571,31 @@ func main() {
 		})
 	}
 
-	for _, listenAddress := range listenAddresses {
-		for _, transportProtocol := range []string{"udp", "tcp"} {
-			errGroup.Go(
-				func() error {
-					server, err := newDnsServer(errGroupCtx, listenAddress, transportProtocol, dnsResolver, maxTcpConnections)
-					if err != nil {
-						return altshiftErrors.New(
-							fmt.Errorf("new dns server (%s): %w", transportProtocol, err),
-							listenAddress,
-						)
-					}
-					if err := serve(server); err != nil {
-						return altshiftErrors.NewWithTrace(
-							fmt.Errorf("serve (%s): %w", transportProtocol, err),
-							listenAddress,
-						)
-					}
-					return nil
-				},
+	if interfaceAddresses, err := net.InterfaceAddrs(); err == nil {
+		for _, listenAddress := range unassignedAddresses(listenAddresses, interfaceAddresses) {
+			slog.WarnContext(
+				errGroupCtx,
+				"",
+				slog.Group(
+					"event",
+					slog.String("action", "listen"),
+					slog.String("reason", "No interface has the address listened on yet; it is served once one does."),
+					slog.String("kind", "event"),
+					slog.String("outcome", "unknown"),
+					slog.Any("category", []string{"network"}),
+					slog.Any("type", []string{"start"}),
+				),
+				slog.Group("server", slog.String("address", listenAddress)),
 			)
 		}
 	}
+
+	errGroup.Go(func() error {
+		if err := serveDns(errGroupCtx, listenAddresses, dnsResolver, maxTcpConnections); err != nil {
+			return fmt.Errorf("serve dns: %w", err)
+		}
+		return nil
+	})
 
 	if err := errGroup.Wait(); err != nil {
 		logger.FatalWithExitingMessage("A server error occurred.", err)
