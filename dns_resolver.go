@@ -199,7 +199,7 @@ func main() {
 			option.NewStringOption('m', "mode", "mode", true, &mode),
 			option.NewStringsOption('l', "listen", "listen address", true, &listenAddresses),
 			option.NewStringOption('H', "hosts-file", "hosts file to consult before forwarding", false, &hostsFile),
-			option.NewStringsOption('b', "blocklist", "blocklist NAME=PATH (repeatable)", false, &blocklistArgs),
+			option.NewStringsOption('b', "blocklist", "ABP-format blocklist NAME=PATH (repeatable); an @@ allow rule in any list overrides block rules in all of them, $important ones included", false, &blocklistArgs),
 			option.NewIntOption('c', "max-connections", "max concurrent upstream DoT connections (dot mode)", false, &maxConnections),
 			option.NewIntOption('w', "min-warm-connections", "warm upstream DoT connections kept ready; 0 disables (dot mode)", false, &minWarmConnections),
 			option.NewStringOption('i', "idle-timeout", "idle timeout for surplus pooled connections, e.g. 30s (dot mode)", false, &idleTimeoutString),

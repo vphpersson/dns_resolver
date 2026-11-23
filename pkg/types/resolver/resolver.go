@@ -689,8 +689,15 @@ func (r *Resolver) warnRejected(
 }
 
 // blockingList returns the first blocklist, in name order, that blocks name,
-// or nil when none does.
+// or nil when none does. The lists are judged together, as AdGuard merges its
+// own: a name some list explicitly allows, with an allow rule that wins within
+// that list, is blocked by none of them, $important rules included. An allow
+// rule is how a list's owner says a name is wanted; personal's @@||x^ is meant
+// to undo oisd_big's ||x^.
 func (r *Resolver) blockingList(name string) Blocklist {
+	if r.allowedByAny(name) {
+		return nil
+	}
 	for _, blocklist := range r.Blocklists() {
 		if blocklist.IsBlocked(name) {
 			return blocklist
@@ -710,9 +717,8 @@ func (r *Resolver) allowedByAny(name string) bool {
 }
 
 // blockedTarget returns the first blocklist blocking a name that answer's CNAME
-// or DNAME records lead to, and that name. A target some list explicitly
-// allows is not blocked by another list's rule, as an allow rule is how a
-// list's owner says that name is wanted.
+// or DNAME records lead to, and that name, judged as blockingList judges a
+// question name.
 func (r *Resolver) blockedTarget(answer *dns.Msg) (Blocklist, string) {
 	for _, record := range answer.Answer {
 		var target string
@@ -722,9 +728,6 @@ func (r *Resolver) blockedTarget(answer *dns.Msg) (Blocklist, string) {
 		case *dns.DNAME:
 			target = typedRecord.Target
 		default:
-			continue
-		}
-		if r.allowedByAny(target) {
 			continue
 		}
 		if blocklist := r.blockingList(target); blocklist != nil {

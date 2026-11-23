@@ -179,13 +179,12 @@ func TestServeDNS_BlocklistAndHostsOverCache(t *testing.T) {
 	}
 }
 
-// An allow rule in one list is honoured when another list blocks a name an
-// answer leads to: a question name a list allows is not blocked for its CNAME
-// targets, and a target a list allows is not blocked by another's rule. The
-// target check blocked whenever any list blocked the target, and an allow rule
-// acted only within its own list, so personal's @@||good.example^ could not
-// unblock good.example's CNAME into a name oisd_big lists. A direct query is
-// judged as before: by each list on its own.
+// An allow rule in any list is honoured over a block rule in another, as
+// AdGuard merges its lists: a name a list allows is not blocked, whether it is
+// the question or a name the answer leads to, and a question name a list
+// allows is not blocked for its CNAME targets either. An allow rule used to act
+// only within its own list, so personal's @@||x^ could not unblock a name
+// oisd_big lists.
 func TestServeDNS_AllowAcrossLists(t *testing.T) {
 	t.Parallel()
 
@@ -226,10 +225,34 @@ func TestServeDNS_AllowAcrossLists(t *testing.T) {
 			wantBlocked: true,
 		},
 		{
-			name:        "direct query of a name another list allows",
-			personal:    "@@||tracker.example^",
-			oisdBig:     "||tracker.example^",
-			qname:       "tracker.example.",
+			name:     "direct query of a name another list allows",
+			personal: "@@||x.example^",
+			oisdBig:  "||x.example^",
+			qname:    "x.example.",
+		},
+		{
+			name:     "direct query below a name another list allows",
+			personal: "@@||x.example^",
+			oisdBig:  "||cdn.x.example^",
+			qname:    "cdn.x.example.",
+		},
+		{
+			name:     "direct query another list blocks as important",
+			personal: "@@||x.example^",
+			oisdBig:  "||x.example^$important",
+			qname:    "x.example.",
+		},
+		{
+			name:        "direct query no list allows",
+			personal:    "@@||unrelated.example^",
+			oisdBig:     "||x.example^",
+			qname:       "x.example.",
+			wantBlocked: true,
+		},
+		{
+			name:        "direct query blocked in the list that allows above it",
+			personal:    "@@||example.com^\n||ads.example.com^$important",
+			qname:       "ads.example.com.",
 			wantBlocked: true,
 		},
 	}
