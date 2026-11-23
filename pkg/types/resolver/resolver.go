@@ -1021,9 +1021,12 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 		LifetimeContext: ctx,
 		ServerAddress:   serverAddress,
 		ServerName:      serverName,
-		Cache:           cache.New(),
-		Mode:            mode,
-		RequestTimeout:  config.RequestTimeout,
+		Cache: cache.New(
+			cache.WithMaxEntries(config.CacheMaxEntries),
+			cache.WithMaxBytes(config.CacheMaxBytes),
+		),
+		Mode:           mode,
+		RequestTimeout: config.RequestTimeout,
 	}
 	if config.MaxInFlight > 0 {
 		resolver.forwardSlots = make(chan struct{}, config.MaxInFlight)

@@ -1,23 +1,33 @@
 package resolver
 
 import (
+	"dns_resolver/pkg/types/cache"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
 	"github.com/altshiftab/utils_go/pkg/http/mux"
 	muxEndpoint "github.com/altshiftab/utils_go/pkg/http/mux/types/endpoint"
 	muxResponse "github.com/altshiftab/utils_go/pkg/http/mux/types/response"
 	muxResponseError "github.com/altshiftab/utils_go/pkg/http/mux/types/response_error"
+	"github.com/altshiftab/utils_go/pkg/http/types/problem_detail"
+	"github.com/altshiftab/utils_go/pkg/http/types/problem_detail/problem_detail_config"
 )
+
+// maxSnapshotLimit bounds how many entries one GET /cache lists, since the
+// listing is built under the cache's lock.
+const maxSnapshotLimit = 10_000
 
 // DiagnosticsHandler returns an HTTP handler exposing the resolver's diagnostic
 // endpoints:
 //
 //   - GET    /metrics       — resolver and cache counters (JSON).
-//   - GET    /cache         — a summary of every live cache entry.
+//   - GET    /cache         — a summary of the live cache entries, most recently
+//     used first: at most ?limit= of them (1000 unless given, 10000 at most),
+//     and only those of one name with ?name=.
 //   - DELETE /cache         — flush the whole cache.
 //   - DELETE /cache?name=x  — evict every entry for one name (the targeted
 //     "unpoison" control, so a single bad name no longer needs a full restart).
@@ -71,14 +81,31 @@ func (r *Resolver) handleMetrics(*http.Request, []byte) (*muxResponse.Response, 
 	return jsonResponse(http.StatusOK, r.Metrics())
 }
 
-func (r *Resolver) handleCacheGet(*http.Request, []byte) (*muxResponse.Response, *muxResponseError.ResponseError) {
+func (r *Resolver) handleCacheGet(request *http.Request, _ []byte) (*muxResponse.Response, *muxResponseError.ResponseError) {
 	if r.Cache == nil {
-		return jsonResponse(http.StatusOK, map[string]any{"size": 0, "entries": []any{}})
+		return jsonResponse(http.StatusOK, map[string]any{"size": 0, "total": 0, "entries": []any{}})
 	}
 
-	entries := r.Cache.Snapshot()
+	query := request.URL.Query()
+
+	limit := cache.DefaultSnapshotLimit
+	if value := query.Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > maxSnapshotLimit {
+			return nil, &muxResponseError.ResponseError{
+				ProblemDetail: problem_detail.New(
+					http.StatusBadRequest,
+					problem_detail_config.WithDetail(fmt.Sprintf("The limit must be an integer from 1 to %d.", maxSnapshotLimit)),
+				),
+			}
+		}
+		limit = parsed
+	}
+
+	entries := r.Cache.Snapshot(query.Get("name"), limit)
 	return jsonResponse(http.StatusOK, map[string]any{
 		"size":    len(entries),
+		"total":   r.Cache.Stats().Entries,
 		"entries": entries,
 	})
 }

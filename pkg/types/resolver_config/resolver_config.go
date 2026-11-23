@@ -52,6 +52,10 @@ type Config struct {
 	// MaxInFlight bounds the requests waiting on the upstream at once; <= 0
 	// means no bound.
 	MaxInFlight int
+	// CacheMaxEntries and CacheMaxBytes bound the cache; <= 0 leaves the
+	// cache's own defaults in place.
+	CacheMaxEntries int
+	CacheMaxBytes   int
 }
 
 // Option mutates a Config.
@@ -99,6 +103,20 @@ func WithRequestTimeout(requestTimeout time.Duration) Option {
 func WithMaxInFlight(maxInFlight int) Option {
 	return func(config *Config) {
 		config.MaxInFlight = maxInFlight
+	}
+}
+
+// WithCacheMaxEntries bounds the number of cached answers.
+func WithCacheMaxEntries(cacheMaxEntries int) Option {
+	return func(config *Config) {
+		config.CacheMaxEntries = cacheMaxEntries
+	}
+}
+
+// WithCacheMaxBytes bounds the approximate memory of the cached answers.
+func WithCacheMaxBytes(cacheMaxBytes int) Option {
+	return func(config *Config) {
+		config.CacheMaxBytes = cacheMaxBytes
 	}
 }
 

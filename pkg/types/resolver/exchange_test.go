@@ -100,7 +100,7 @@ func TestServeDNS_FailedExchangeAnswersNothing(t *testing.T) {
 			if len(reply.Answer) != 0 {
 				t.Fatalf("reply carries %d answers from a failed exchange: %v", len(reply.Answer), reply.Answer)
 			}
-			if entries := resolver.Cache.Snapshot(); len(entries) != 0 {
+			if entries := resolver.Cache.Snapshot("", 0); len(entries) != 0 {
 				t.Fatalf("cache holds %d entries after a failed exchange: %+v", len(entries), entries)
 			}
 		})

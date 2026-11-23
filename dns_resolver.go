@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"dns_resolver/pkg/types/abp_blocklist"
+	"dns_resolver/pkg/types/cache"
 	"dns_resolver/pkg/types/hosts"
 	"dns_resolver/pkg/types/resolver"
 	"dns_resolver/pkg/types/resolver_config"
@@ -36,6 +37,7 @@ var (
 	errInvalidMinWarmConnections = errors.New("invalid min warm connections")
 	errInvalidMaxInFlight        = errors.New("invalid max in flight")
 	errInvalidMaxTcpConnections  = errors.New("invalid max tcp connections")
+	errInvalidCacheBound         = errors.New("invalid cache bound")
 	errInvalidBlocklist          = errors.New("invalid blocklist")
 	errDuplicateBlocklistName    = errors.New("duplicate blocklist name")
 	errNegativeDuration          = errors.New("negative duration")
@@ -182,6 +184,8 @@ func main() {
 	requestTimeoutString := resolver_config.DefaultRequestTimeout.String()
 	maxInFlight := resolver_config.DefaultMaxInFlight
 	maxTcpConnections := defaultMaxTcpConnections
+	cacheMaxEntries := cache.DefaultMaxEntries
+	cacheMaxBytes := cache.DefaultMaxBytes
 
 	parser := &argumentParserPkg.Parser{
 		ProgramName: programName,
@@ -201,6 +205,8 @@ func main() {
 			option.NewStringOption('t', "request-timeout", "time allowed to answer one request, upstream attempts included, e.g. 4s", false, &requestTimeoutString),
 			option.NewIntOption(0, "max-in-flight", "requests that may wait on the upstream at once; beyond it a request is answered SERVFAIL", false, &maxInFlight),
 			option.NewIntOption(0, "max-tcp-connections", "TCP client connections served at once", false, &maxTcpConnections),
+			option.NewIntOption(0, "cache-max-entries", "answers the cache holds at most; the least recently used go first", false, &cacheMaxEntries),
+			option.NewIntOption(0, "cache-max-bytes", "approximate memory the cached answers take at most, in bytes", false, &cacheMaxBytes),
 			option.NewStringOption('I', "info", "address:port for the diagnostic HTTP server (/metrics, /cache); omit to disable. Bind to loopback/LAN only", false, &infoAddress),
 		},
 	}
@@ -262,6 +268,13 @@ func main() {
 		logger.FatalWithExitingMessage(
 			"The max TCP connections must be at least 1.",
 			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxTcpConnections, maxTcpConnections)),
+		)
+	}
+
+	if cacheMaxEntries < 1 || cacheMaxBytes < 1 {
+		logger.FatalWithExitingMessage(
+			"The cache bounds must be at least 1.",
+			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d entries, %d bytes", errInvalidCacheBound, cacheMaxEntries, cacheMaxBytes)),
 		)
 	}
 
@@ -336,6 +349,8 @@ func main() {
 		resolver_config.WithKeepAliveInterval(keepAliveInterval),
 		resolver_config.WithRequestTimeout(requestTimeout),
 		resolver_config.WithMaxInFlight(maxInFlight),
+		resolver_config.WithCacheMaxEntries(cacheMaxEntries),
+		resolver_config.WithCacheMaxBytes(cacheMaxBytes),
 	)
 	if err != nil {
 		logger.FatalWithExitingMessage(

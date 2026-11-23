@@ -1,13 +1,15 @@
 package cache
 
 import (
+	"container/list"
 	"context"
-	"github.com/Motmedel/dns_utils/pkg/dns_utils"
-	"github.com/miekg/dns"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Motmedel/dns_utils/pkg/dns_utils"
+	"github.com/miekg/dns"
 )
 
 // maxCacheTtl bounds how long any single entry may live. It defends against an
@@ -16,6 +18,28 @@ import (
 // odd response could pin a name effectively forever. 24h matches Unbound's
 // cache-max-ttl default.
 const maxCacheTtl = 24 * time.Hour
+
+// maxNegativeTtl bounds how long an NXDOMAIN or NODATA answer may live, as
+// Unbound's cache-max-negative-ttl does. The root zone's SOA would otherwise
+// keep every random name under a missing TLD for a day.
+const maxNegativeTtl = time.Hour
+
+const (
+	// DefaultMaxEntries bounds the number of cached answers.
+	DefaultMaxEntries = 50_000
+	// DefaultMaxBytes bounds the approximate memory the cached answers take.
+	DefaultMaxBytes = 64 << 20
+	// DefaultSnapshotLimit is how many entries Snapshot lists when not told.
+	DefaultSnapshotLimit = 1000
+)
+
+// Approximate costs of an entry beyond its wire length, so that MaxBytes
+// tracks memory rather than the wire size alone: a message unpacks into one
+// allocation per record, and an entry costs a map slot and a list element.
+const (
+	recordOverhead = 64
+	entryOverhead  = 128
+)
 
 type Key struct {
 	Name   string
@@ -26,13 +50,24 @@ type Key struct {
 }
 
 type Entry struct {
+	Key        Key
 	Msg        *dns.Msg
 	Expiration time.Time
+	size       int
 }
 
+// Cache holds answers by Key, evicting the least recently used when it holds
+// more than MaxEntries of them or more than MaxBytes of approximate memory.
 type Cache struct {
-	sync.RWMutex
-	entries map[Key]*Entry
+	mutex sync.Mutex
+	// entries indexes order, whose elements hold *Entry, the most recently
+	// used at the front.
+	entries map[Key]*list.Element
+	order   *list.List
+	bytes   int
+
+	maxEntries int
+	maxBytes   int
 
 	hits       atomic.Uint64
 	misses     atomic.Uint64
@@ -43,9 +78,12 @@ type Cache struct {
 
 // Stats is a point-in-time snapshot of cache counters, suitable for the
 // diagnostic /metrics endpoint. The counters are monotonic for the process
-// lifetime; Entries is the live size.
+// lifetime; Entries and Bytes are the live size.
 type Stats struct {
 	Entries    int    `json:"entries"`
+	Bytes      int    `json:"bytes"`
+	MaxEntries int    `json:"max_entries"`
+	MaxBytes   int    `json:"max_bytes"`
 	Hits       uint64 `json:"hits"`
 	Misses     uint64 `json:"misses"`
 	Evictions  uint64 `json:"evictions"`
@@ -66,14 +104,70 @@ type EntryInfo struct {
 	RemainingS int    `json:"remaining_s"`
 }
 
-func New() *Cache {
-	return &Cache{entries: make(map[Key]*Entry)}
+// Option tunes a Cache made by New.
+type Option func(*Cache)
+
+// WithMaxEntries bounds the number of cached answers; <= 0 keeps the default.
+func WithMaxEntries(maxEntries int) Option {
+	return func(c *Cache) {
+		if maxEntries > 0 {
+			c.maxEntries = maxEntries
+		}
+	}
+}
+
+// WithMaxBytes bounds the approximate memory of the cached answers; <= 0
+// keeps the default.
+func WithMaxBytes(maxBytes int) Option {
+	return func(c *Cache) {
+		if maxBytes > 0 {
+			c.maxBytes = maxBytes
+		}
+	}
+}
+
+func New(options ...Option) *Cache {
+	c := &Cache{
+		entries:    make(map[Key]*list.Element),
+		order:      list.New(),
+		maxEntries: DefaultMaxEntries,
+		maxBytes:   DefaultMaxBytes,
+	}
+	for _, option := range options {
+		if option != nil {
+			option(c)
+		}
+	}
+	return c
+}
+
+// entrySize estimates the memory an entry for message takes.
+func entrySize(key Key, message *dns.Msg) int {
+	records := len(message.Answer) + len(message.Ns) + len(message.Extra)
+	return message.Len() + records*recordOverhead + len(key.Name) + entryOverhead
+}
+
+// removeElement drops element from the cache. The caller holds the mutex.
+func (c *Cache) removeElement(element *list.Element) {
+	entry, ok := element.Value.(*Entry)
+	if !ok {
+		return
+	}
+	c.order.Remove(element)
+	delete(c.entries, entry.Key)
+	c.bytes -= entry.size
 }
 
 func (c *Cache) Get(key Key) (*dns.Msg, bool, time.Duration) {
-	c.RLock()
-	entry, ok := c.entries[key]
-	c.RUnlock()
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	element, ok := c.entries[key]
+	if !ok {
+		c.misses.Add(1)
+		return nil, false, 0
+	}
+	entry, ok := element.Value.(*Entry)
 	if !ok {
 		c.misses.Add(1)
 		return nil, false, 0
@@ -81,19 +175,13 @@ func (c *Cache) Get(key Key) (*dns.Msg, bool, time.Duration) {
 
 	remainingTtl := time.Until(entry.Expiration)
 	if remainingTtl <= 0 {
-		c.Lock()
-		// Only delete if the entry in the map is still the expired one we
-		// observed; otherwise a concurrent Set may have replaced it.
-		if cur := c.entries[key]; cur == entry {
-			delete(c.entries, key)
-			c.evictions.Add(1)
-		}
-		c.Unlock()
-
+		c.removeElement(element)
+		c.evictions.Add(1)
 		c.misses.Add(1)
 		return nil, false, 0
 	}
 
+	c.order.MoveToFront(element)
 	c.hits.Add(1)
 	return entry.Msg, true, remainingTtl
 }
@@ -132,7 +220,8 @@ func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) b
 	// without an SOA says nothing about that and is not cached; it would
 	// otherwise take the 24h cap. An upstream answering a query it did not
 	// recurse for, from what it happened to have cached, sends just that.
-	if isNegative(message) && !hasSoa(message.Ns) {
+	negative := isNegative(message)
+	if negative && !hasSoa(message.Ns) {
 		c.rejections.Add(1)
 		return false
 	}
@@ -142,15 +231,39 @@ func (c *Cache) Set(key Key, message *dns.Msg, expirationReference *time.Time) b
 		c.rejections.Add(1)
 		return false
 	}
-	if ttl > maxCacheTtl {
-		ttl = maxCacheTtl
+	ttl = min(ttl, maxCacheTtl)
+	if negative {
+		ttl = min(ttl, maxNegativeTtl)
 	}
 
-	c.Lock()
-	defer c.Unlock()
-	c.entries[key] = &Entry{Msg: message, Expiration: expirationReference.Add(ttl)}
+	size := entrySize(key, message)
+	entry := &Entry{Key: key, Msg: message, Expiration: expirationReference.Add(ttl), size: size}
 
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	// An answer too large for the whole cache would only empty it.
+	if size > c.maxBytes {
+		c.rejections.Add(1)
+		return false
+	}
+
+	if element, ok := c.entries[key]; ok {
+		c.removeElement(element)
+	}
+	c.entries[key] = c.order.PushFront(entry)
+	c.bytes += size
 	c.insertions.Add(1)
+
+	for c.order.Len() > c.maxEntries || c.bytes > c.maxBytes {
+		back := c.order.Back()
+		if back == nil {
+			break
+		}
+		c.removeElement(back)
+		c.evictions.Add(1)
+	}
+
 	return true
 }
 
@@ -171,12 +284,16 @@ func hasSoa(records []dns.RR) bool {
 
 // Stats returns a snapshot of the cache counters and current size.
 func (c *Cache) Stats() Stats {
-	c.RLock()
-	entries := len(c.entries)
-	c.RUnlock()
+	c.mutex.Lock()
+	entries := c.order.Len()
+	bytes := c.bytes
+	c.mutex.Unlock()
 
 	return Stats{
 		Entries:    entries,
+		Bytes:      bytes,
+		MaxEntries: c.maxEntries,
+		MaxBytes:   c.maxBytes,
 		Hits:       c.hits.Load(),
 		Misses:     c.misses.Load(),
 		Evictions:  c.evictions.Load(),
@@ -185,16 +302,34 @@ func (c *Cache) Stats() Stats {
 	}
 }
 
-// Snapshot returns a summary of every live (non-expired) entry, most useful for
-// answering "is this name cached, and as what?" from the diagnostic endpoint.
-func (c *Cache) Snapshot() []EntryInfo {
+// Snapshot summarises live (non-expired) entries, most recently used first,
+// for answering "is this name cached, and as what?" from the diagnostic
+// endpoint. A non-empty name lists only that name's entries, matched as
+// DeleteName matches; at most limit are listed, or DefaultSnapshotLimit when
+// limit is not positive.
+func (c *Cache) Snapshot(name string, limit int) []EntryInfo {
+	if limit <= 0 {
+		limit = DefaultSnapshotLimit
+	}
+	var target string
+	if name != "" {
+		target = strings.ToLower(dns.Fqdn(name))
+	}
+
 	now := time.Now()
 
-	c.RLock()
-	defer c.RUnlock()
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 
-	infos := make([]EntryInfo, 0, len(c.entries))
-	for key, entry := range c.entries {
+	infos := make([]EntryInfo, 0, min(limit, c.order.Len()))
+	for element := c.order.Front(); element != nil && len(infos) < limit; element = element.Next() {
+		entry, ok := element.Value.(*Entry)
+		if !ok {
+			continue
+		}
+		if target != "" && entry.Key.Name != target {
+			continue
+		}
 		remaining := entry.Expiration.Sub(now)
 		if remaining <= 0 {
 			continue
@@ -208,11 +343,11 @@ func (c *Cache) Snapshot() []EntryInfo {
 		}
 
 		infos = append(infos, EntryInfo{
-			Name:       key.Name,
-			Type:       dns.TypeToString[key.Qtype],
-			Class:      dns.ClassToString[key.Qclass],
-			DO:         key.DO,
-			CD:         key.CD,
+			Name:       entry.Key.Name,
+			Type:       dns.TypeToString[entry.Key.Qtype],
+			Class:      dns.ClassToString[entry.Key.Qclass],
+			DO:         entry.Key.DO,
+			CD:         entry.Key.CD,
 			Rcode:      rcode,
 			Answers:    answers,
 			RemainingS: int(remaining.Seconds()),
@@ -223,11 +358,13 @@ func (c *Cache) Snapshot() []EntryInfo {
 
 // Flush removes every entry and returns the number removed.
 func (c *Cache) Flush() int {
-	c.Lock()
-	defer c.Unlock()
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 
-	removed := len(c.entries)
-	c.entries = make(map[Key]*Entry)
+	removed := c.order.Len()
+	c.entries = make(map[Key]*list.Element)
+	c.order.Init()
+	c.bytes = 0
 	return removed
 }
 
@@ -239,48 +376,34 @@ func (c *Cache) Flush() int {
 func (c *Cache) DeleteName(name string) int {
 	target := strings.ToLower(dns.Fqdn(name))
 
-	c.Lock()
-	defer c.Unlock()
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 
 	var removed int
-	for key := range c.entries {
+	for key, element := range c.entries {
 		if key.Name == target {
-			delete(c.entries, key)
+			c.removeElement(element)
 			removed++
 		}
 	}
 	return removed
 }
 
-// sweep removes expired entries. The scan phase uses an RLock so concurrent
-// readers are not blocked; the delete phase takes a write lock only if any
-// expired keys were found.
+// sweep removes expired entries.
 func (c *Cache) sweep() {
 	now := time.Now()
 
-	var expired []Key
-	c.RLock()
-	for k, e := range c.entries {
-		if now.After(e.Expiration) {
-			expired = append(expired, k)
-		}
-	}
-	c.RUnlock()
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 
-	if len(expired) == 0 {
-		return
-	}
-
-	c.Lock()
-	for _, k := range expired {
-		// Re-check under the write lock: a concurrent Set may have replaced
-		// the entry with a fresh one between the two phases.
-		if e, ok := c.entries[k]; ok && now.After(e.Expiration) {
-			delete(c.entries, k)
+	for element := c.order.Front(); element != nil; {
+		next := element.Next()
+		if entry, ok := element.Value.(*Entry); ok && now.After(entry.Expiration) {
+			c.removeElement(element)
 			c.evictions.Add(1)
 		}
+		element = next
 	}
-	c.Unlock()
 }
 
 func (c *Cache) StartJanitor(ctx context.Context, every time.Duration) {
