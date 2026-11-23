@@ -4,6 +4,9 @@ import (
 	"dns_resolver/pkg/types/resolver_config"
 	"fmt"
 	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,5 +220,66 @@ func TestServeDNS_BoundedAttempts(t *testing.T) {
 	}
 	if sent := upstream.receivedFor("failing.example."); sent != maxExchangeAttempts {
 		t.Fatalf("upstream was sent the query %d times; want %d", sent, maxExchangeAttempts)
+	}
+}
+
+// When the upstream closes the connections idle in the pool, a request must
+// still be answered. The attempts took the most recently used idle connection
+// each time, so with three or more dead ones idle every attempt failed and the
+// request was answered SERVFAIL without a dial.
+func TestServeDNS_DeadPooledConnections(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		idle int
+	}{
+		{name: "one idle", idle: 1},
+		{name: "as many idle as attempts", idle: maxExchangeAttempts},
+		{name: "more idle than attempts", idle: 2 * maxExchangeAttempts},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The priming queries are held until all of them have arrived, so
+			// each takes a connection of its own.
+			var arrived atomic.Int64
+			release := make(chan struct{})
+			upstream := startUpstream(t, func(query *dns.Msg) *dns.Msg {
+				if strings.HasPrefix(query.Question[0].Name, "prime") {
+					arrived.Add(1)
+					select {
+					case <-release:
+					case <-time.After(5 * time.Second):
+					}
+				}
+				return answerWith("192.0.2.1")(query)
+			})
+			resolver := newTestResolver(t, upstream, resolver_config.WithMaxConnections(2*maxExchangeAttempts+2))
+
+			var group sync.WaitGroup
+			for i := range testCase.idle {
+				group.Go(func() { ask(resolver, "udp", newQuery(fmt.Sprintf("prime%d.example.", i), dns.TypeA)) })
+			}
+			waitFor(t, "the priming queries to reach the upstream", func() bool { return arrived.Load() == int64(testCase.idle) })
+			close(release)
+			group.Wait()
+			if idle := resolver.DotConfig.ConnectionPool.Len(); idle != testCase.idle {
+				t.Fatalf("pool holds %d idle connections; the test needs %d", idle, testCase.idle)
+			}
+
+			upstream.closeConnections()
+			dialled := upstream.accepted.Load()
+
+			reply := ask(resolver, "udp", newQuery("after.example.", dns.TypeA))
+			if reply == nil || reply.Rcode != dns.RcodeSuccess || len(reply.Answer) != 1 {
+				t.Fatalf("rcode = %s; want NOERROR with the answer", rcodeOf(reply))
+			}
+			if upstream.accepted.Load() == dialled {
+				t.Fatal("the request was answered without a new connection")
+			}
+		})
 	}
 }

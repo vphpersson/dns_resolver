@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"dns_resolver/pkg/connection_pool"
@@ -495,9 +496,24 @@ func (r *Resolver) exchangeDot(
 	// Put closes the connection when the exchange failed on it.
 	connectionPool.Put(ctx, connection, err)
 	if err != nil {
+		// The upstream closing one pooled connection is most often it closing
+		// them all, as on a restart, so the next attempt dials rather than
+		// spend itself on another of them.
+		if isDeadConnection(err) {
+			connectionPool.DropIdle(ctx)
+		}
 		return nil, true, err
 	}
 	return response, false, nil
+}
+
+// isDeadConnection reports whether err says the peer closed the connection,
+// as against a timeout, which may be the name's fault rather than the
+// connection's.
+func isDeadConnection(err error) bool {
+	return altshiftErrors.IsClosedError(err) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 // exchangeOnConnection exchanges request over connection. What a failed

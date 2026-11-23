@@ -213,6 +213,29 @@ func (pool *Pool[T]) Put(ctx context.Context, connection T, err error) {
 	pool.mutex.Unlock()
 }
 
+// DropIdle closes every idle connection and returns how many it closed. A
+// connection the peer closed while it sat idle is found out only by using it,
+// and when one is, those idle beside it have most likely gone the same way:
+// handing them out one by one would spend a request's attempts on them.
+func (pool *Pool[T]) DropIdle(ctx context.Context) int {
+	pool.mutex.Lock()
+	idleConnections := make([]T, 0, pool.connections.Len())
+	for element := pool.connections.Front(); element != nil; element = element.Next() {
+		if idle, ok := element.Value.(idleConnection[T]); ok {
+			idleConnections = append(idleConnections, idle.connection)
+		}
+	}
+	pool.numActiveConnections -= pool.connections.Len()
+	pool.connections.Init()
+	pool.condition.Broadcast()
+	pool.mutex.Unlock()
+
+	for _, connection := range idleConnections {
+		pool.closeConnection(ctx, connection)
+	}
+	return len(idleConnections)
+}
+
 // Maintain runs a single maintenance pass: it health-checks/keep-alives the
 // warm set via Ping, evicts surplus connections idle past IdleTimeout, and
 // dials replacements up to MinIdleConnections. It is safe to call concurrently

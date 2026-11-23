@@ -43,8 +43,21 @@ type testUpstream struct {
 	roots    *x509.CertPool
 	accepted atomic.Int64
 
-	mu      sync.Mutex
-	queries []*dns.Msg
+	mu          sync.Mutex
+	queries     []*dns.Msg
+	connections []net.Conn
+}
+
+// closeConnections closes the upstream's end of every connection it accepted,
+// as an upstream does when it restarts or reaps idle clients.
+func (u *testUpstream) closeConnections() {
+	u.mu.Lock()
+	connections := u.connections
+	u.connections = nil
+	u.mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
 }
 
 func (u *testUpstream) received() []*dns.Msg {
@@ -66,13 +79,16 @@ func (u *testUpstream) receivedFor(name string) int {
 
 type countingListener struct {
 	net.Listener
-	accepted *atomic.Int64
+	upstream *testUpstream
 }
 
 func (l *countingListener) Accept() (net.Conn, error) {
 	connection, err := l.Listener.Accept()
 	if err == nil {
-		l.accepted.Add(1)
+		l.upstream.accepted.Add(1)
+		l.upstream.mu.Lock()
+		l.upstream.connections = append(l.upstream.connections, connection)
+		l.upstream.mu.Unlock()
 	}
 	return connection, err
 }
@@ -121,7 +137,7 @@ func startUpstream(t *testing.T, answer answerFunc) *testUpstream {
 	upstream.address = listener.Addr().String()
 
 	tlsListener := tls.NewListener(
-		&countingListener{Listener: listener, accepted: &upstream.accepted},
+		&countingListener{Listener: listener, upstream: upstream},
 		&tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12},
 	)
 

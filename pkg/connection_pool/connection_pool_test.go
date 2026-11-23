@@ -581,3 +581,69 @@ func TestConnectionPool_GetDialHonoursContext(t *testing.T) {
 		})
 	}
 }
+
+// DropIdle closes every idle connection and frees their slots, so the next Get
+// dials a fresh one.
+func TestConnectionPool_DropIdle(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		idle int
+	}{
+		{name: "none idle", idle: 0},
+		{name: "some idle", idle: 2},
+		{name: "pool full of idle", idle: 3},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			var dials int
+			pool := connection_pool.New(func(context.Context) (*mockConnection, error) {
+				dials++
+				return newMockConnection()
+			})
+			pool.MaxNumConnections = 3
+
+			connections := make([]*mockConnection, 0, testCase.idle)
+			for range testCase.idle {
+				connection, err := pool.Get(t.Context())
+				if err != nil {
+					t.Fatalf("get: %v", err)
+				}
+				connections = append(connections, connection)
+			}
+			for _, connection := range connections {
+				pool.Put(t.Context(), connection, nil)
+			}
+
+			if dropped := pool.DropIdle(t.Context()); dropped != testCase.idle {
+				t.Fatalf("DropIdle = %d; want %d", dropped, testCase.idle)
+			}
+			if idle := pool.Len(); idle != 0 {
+				t.Fatalf("%d connections idle after DropIdle", idle)
+			}
+			for _, connection := range connections {
+				if !connection.isClosed {
+					t.Fatal("DropIdle left a connection open")
+				}
+			}
+
+			// Every slot is free again: the pool can dial up to its limit.
+			dialsBefore := dials
+			for range pool.MaxNumConnections {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				_, err := pool.Get(ctx)
+				cancel()
+				if err != nil {
+					t.Fatalf("get after DropIdle: %v", err)
+				}
+			}
+			if dials-dialsBefore != pool.MaxNumConnections {
+				t.Fatalf("dialled %d connections after DropIdle; want %d", dials-dialsBefore, pool.MaxNumConnections)
+			}
+		})
+	}
+}
