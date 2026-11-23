@@ -485,26 +485,37 @@ func (r *Resolver) exchangeDot(
 	request *dns.Msg,
 	client *dns.Client,
 	connectionPool *connection_pool.Pool[*dns.Conn],
-) (response *dns.Msg, retry bool, err error) {
+) (*dns.Msg, bool, error) {
 	connection, err := connectionPool.Get(ctx)
 	if err != nil {
 		return nil, false, altshiftErrors.New(fmt.Errorf("connection pool get: %w", err), connectionPool)
 	}
-	// Put closes the connection when err, as it stands when this returns, is
-	// not nil.
-	defer func() {
-		connectionPool.Put(ctx, connection, err)
-	}()
 
-	// What a failed exchange read is not an answer, so the response is taken
-	// only once the exchange has succeeded.
+	response, err := r.exchangeOnConnection(ctx, request, client, connection)
+	// Put closes the connection when the exchange failed on it.
+	connectionPool.Put(ctx, connection, err)
+	if err != nil {
+		return nil, true, err
+	}
+	return response, false, nil
+}
+
+// exchangeOnConnection exchanges request over connection. What a failed
+// exchange read is not an answer, so a response is returned only from an
+// exchange that succeeded and answers the question asked.
+func (r *Resolver) exchangeOnConnection(
+	ctx context.Context,
+	request *dns.Msg,
+	client *dns.Client,
+	connection *dns.Conn,
+) (*dns.Msg, error) {
 	exchanged, err := dns_utils.ExchangeWithConn(ctx, request, client, connection)
 	trimLoggedMessages(ctx)
 	if err == nil || errors.Is(err, dnsUtilsErrors.ErrUnsuccessfulRcode) {
 		// An rcode is the upstream's answer, not a fault of the connection.
 		err = checkAnswer(request, exchanged)
 		if err == nil {
-			return exchanged, false, nil
+			return exchanged, nil
 		}
 	}
 
@@ -523,8 +534,7 @@ func (r *Resolver) exchangeDot(
 		)
 	}
 
-	err = fmt.Errorf("dns utils exchange with conn: %w", err)
-	return nil, true, err
+	return nil, fmt.Errorf("dns utils exchange with conn: %w", err)
 }
 
 // checkAnswer reports whether response answers query: the question the

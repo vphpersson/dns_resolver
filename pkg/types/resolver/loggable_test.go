@@ -75,6 +75,8 @@ func bigAnswer(qtype uint16) answerFunc {
 //
 // It swaps the default logger, so it does not run in parallel; the parallel
 // tests are paused while it runs.
+//
+//nolint:paralleltest // It swaps the default logger.
 func TestServeDNS_LogSize(t *testing.T) {
 	const maxLineLength = 16 << 10
 
@@ -92,6 +94,7 @@ func TestServeDNS_LogSize(t *testing.T) {
 		{name: "many addresses", qname: "manya.example.", qtype: dns.TypeA},
 	}
 
+	//nolint:paralleltest // The cases share the swapped default logger.
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			upstream := startUpstream(t, bigAnswer(testCase.qtype))

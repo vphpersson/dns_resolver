@@ -89,7 +89,7 @@ func TestNewDnsServer_TcpConnectionLimit(t *testing.T) {
 				reply.SetReply(request)
 				_ = writer.WriteMsg(reply)
 			})
-			server, err := newDnsServer("127.0.0.1:0", "tcp", handler, testCase.maxTcpConnections)
+			server, err := newDnsServer(t.Context(), "127.0.0.1:0", "tcp", handler, testCase.maxTcpConnections)
 			if err != nil {
 				t.Fatalf("new dns server: %v", err)
 			}
@@ -101,7 +101,8 @@ func TestNewDnsServer_TcpConnectionLimit(t *testing.T) {
 
 			address := server.Listener.Addr().String()
 
-			first, err := net.Dial("tcp", address)
+			var dialer net.Dialer
+			first, err := dialer.DialContext(t.Context(), "tcp", address)
 			if err != nil {
 				t.Fatalf("dial first: %v", err)
 			}
@@ -110,7 +111,7 @@ func TestNewDnsServer_TcpConnectionLimit(t *testing.T) {
 				t.Fatalf("first connection not served: %v", err)
 			}
 
-			second, err := net.Dial("tcp", address)
+			second, err := dialer.DialContext(t.Context(), "tcp", address)
 			if err != nil {
 				t.Fatalf("dial second: %v", err)
 			}

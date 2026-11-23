@@ -137,12 +137,13 @@ func (l *List) IsBlocked(qname string) bool {
 	}
 }
 
-// parseOptions reads the options after a rule's $. It reports whether the
-// rule still applies to every request for its host, which is all a DNS
+// parseOptions reads the options after a rule's $. It reports, first, whether
+// the rule still applies to every request for its host, which is all a DNS
 // resolver can act on, and whether it is important. An option that narrows a
 // rule -- to third-party requests, a client, a record type -- makes the rule
 // one this parser cannot honour, and it is skipped rather than widened.
-func parseOptions(options string) (applies bool, important bool) {
+func parseOptions(options string) (bool, bool) {
+	var important bool
 	for _, option := range strings.Split(options, ",") {
 		switch strings.ToLower(strings.TrimSpace(option)) {
 		case "important":
@@ -155,9 +156,9 @@ func parseOptions(options string) (applies bool, important bool) {
 	return true, important
 }
 
-// nextLine splits the first line off data, without the length limit a
+// nextLine splits data into its first line and the rest, without the length limit a
 // bufio.Scanner would impose on it.
-func nextLine(data []byte) (line []byte, rest []byte) {
+func nextLine(data []byte) ([]byte, []byte) {
 	if i := bytes.IndexByte(data, '\n'); i >= 0 {
 		return data[:i], data[i+1:]
 	}

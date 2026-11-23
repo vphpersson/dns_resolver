@@ -85,7 +85,7 @@ var singleLabelTypes = map[uint16]struct{}{
 // a zone's apex is not answered locally: the DS record lives in the parent,
 // whose proof that the zone is unsigned is what lets a validating client
 // accept the zone's local answers.
-func Match(name string, qtype uint16) (zone string, ok bool) {
+func Match(name string, qtype uint16) (string, bool) {
 	name = strings.ToLower(dns.Fqdn(name))
 
 	for candidate := name; candidate != "."; {

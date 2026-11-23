@@ -24,6 +24,8 @@ func waitFor(t *testing.T, what string, condition func() bool) {
 // the cache holds is still answered. Nothing bounded the requests waiting on
 // the upstream before: each UDP packet got a goroutine that waited as long as
 // the pool made it.
+//
+//nolint:tparallel // The subtests share the one held slot, so they run in turn.
 func TestServeDNS_InFlightLimit(t *testing.T) {
 	t.Parallel()
 
@@ -57,7 +59,7 @@ func TestServeDNS_InFlightLimit(t *testing.T) {
 		{name: "cached name answered", qname: "cached.example.", wantRcode: dns.RcodeSuccess},
 	}
 
-	// The cases share the one held slot, so they run in turn.
+	//nolint:paralleltest // The cases share the one held slot, so they run in turn.
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			start := time.Now()

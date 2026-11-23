@@ -113,8 +113,9 @@ func TestServeDNS_UpstreamQueryIsOwn(t *testing.T) {
 			if query.CheckingDisabled != testCase.wantCD {
 				t.Fatalf("upstream query CD = %t; want %t", query.CheckingDisabled, testCase.wantCD)
 			}
-			if len(query.Question) != 1 || query.Question[0].Name != strings.ToLower(testCase.qname) {
-				t.Fatalf("upstream question = %v; want one for %q", query.Question, strings.ToLower(testCase.qname))
+			wantName := strings.ToLower(testCase.qname)
+			if len(query.Question) != 1 || query.Question[0].Name != wantName {
+				t.Fatalf("upstream question = %v; want one for %q", query.Question, wantName)
 			}
 			if len(query.Answer) != 0 || len(query.Ns) != 0 || len(query.Extra) != 1 {
 				t.Fatalf("upstream query sections an=%d ns=%d ar=%d; want 0, 0 and the OPT alone", len(query.Answer), len(query.Ns), len(query.Extra))

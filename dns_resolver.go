@@ -48,7 +48,7 @@ var (
 // "tcp"). TCP connections are served at most maxTcpConnections at a time, as
 // each holds a goroutine and a descriptor for as long as its client keeps it
 // open; the descriptors are the ones the upstream dials need too.
-func newDnsServer(address string, network string, handler dns.Handler, maxTcpConnections int) (*dns.Server, error) {
+func newDnsServer(ctx context.Context, address string, network string, handler dns.Handler, maxTcpConnections int) (*dns.Server, error) {
 	server := &dns.Server{
 		Addr:          address,
 		Net:           network,
@@ -62,9 +62,10 @@ func newDnsServer(address string, network string, handler dns.Handler, maxTcpCon
 		return server, nil
 	}
 
-	listener, err := net.Listen("tcp", address)
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(ctx, "tcp", address)
 	if err != nil {
-		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("net listen: %w", err), address)
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("listen config listen: %w", err), address)
 	}
 	server.Listener = netutil.LimitListener(listener, maxTcpConnections)
 	return server, nil
@@ -482,7 +483,7 @@ func main() {
 		for _, transportProtocol := range []string{"udp", "tcp"} {
 			errGroup.Go(
 				func() error {
-					server, err := newDnsServer(listenAddress, transportProtocol, dnsResolver, maxTcpConnections)
+					server, err := newDnsServer(errGroupCtx, listenAddress, transportProtocol, dnsResolver, maxTcpConnections)
 					if err != nil {
 						return altshiftErrors.New(
 							fmt.Errorf("new dns server (%s): %w", transportProtocol, err),
