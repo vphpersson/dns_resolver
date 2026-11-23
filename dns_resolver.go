@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	motmedelLogHandler "github.com/altshiftab/utils_go/pkg/log/handler"
 	schemaUtils "github.com/altshiftab/utils_go/pkg/schema/utils"
 	"github.com/miekg/dns"
+	"golang.org/x/net/netutil"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -32,11 +34,54 @@ import (
 var (
 	errInvalidMaxConnections     = errors.New("invalid max connections")
 	errInvalidMinWarmConnections = errors.New("invalid min warm connections")
+	errInvalidMaxInFlight        = errors.New("invalid max in flight")
+	errInvalidMaxTcpConnections  = errors.New("invalid max tcp connections")
 	errInvalidBlocklist          = errors.New("invalid blocklist")
 	errDuplicateBlocklistName    = errors.New("duplicate blocklist name")
 	errNegativeDuration          = errors.New("negative duration")
 	errNonPositiveDuration       = errors.New("non-positive duration")
 )
+
+// newDnsServer makes a DNS server for one address and transport ("udp" or
+// "tcp"). TCP connections are served at most maxTcpConnections at a time, as
+// each holds a goroutine and a descriptor for as long as its client keeps it
+// open; the descriptors are the ones the upstream dials need too.
+func newDnsServer(address string, network string, handler dns.Handler, maxTcpConnections int) (*dns.Server, error) {
+	server := &dns.Server{
+		Addr:          address,
+		Net:           network,
+		Handler:       handler,
+		ReadTimeout:   dnsReadTimeout,
+		WriteTimeout:  dnsWriteTimeout,
+		IdleTimeout:   func() time.Duration { return dnsTcpIdleTimeout },
+		MaxTCPQueries: dnsMaxTcpQueries,
+	}
+	if network != "tcp" {
+		return server, nil
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("net listen: %w", err), address)
+	}
+	server.Listener = netutil.LimitListener(listener, maxTcpConnections)
+	return server, nil
+}
+
+// serve runs server until it fails, on the listener newDnsServer made for it
+// when there is one.
+func serve(server *dns.Server) error {
+	if server.Listener != nil {
+		if err := server.ActivateAndServe(); err != nil {
+			return fmt.Errorf("dns server activate and serve: %w", err)
+		}
+		return nil
+	}
+	if err := server.ListenAndServe(); err != nil {
+		return fmt.Errorf("dns server listen and serve: %w", err)
+	}
+	return nil
+}
 
 // parseDuration parses a duration flag value. A negative value is refused, and
 // so is zero unless allowZero is set.
@@ -55,6 +100,19 @@ func parseDuration(value string, allowZero bool) (time.Duration, error) {
 }
 
 const programName = "dns_resolver"
+
+const (
+	// The defaults miekg/dns would apply anyway, stated so they are this
+	// program's: the time a TCP client has to send its first query, then
+	// between queries, and the queries one connection may carry.
+	dnsReadTimeout    = 2 * time.Second
+	dnsWriteTimeout   = 2 * time.Second
+	dnsTcpIdleTimeout = 8 * time.Second
+	dnsMaxTcpQueries  = 128
+	// defaultMaxTcpConnections bounds the TCP connections served at once. A
+	// connection over the bound waits in the listen backlog for a free one.
+	defaultMaxTcpConnections = 128
+)
 
 const (
 	diagnosticsReadHeaderTimeout = 5 * time.Second
@@ -122,6 +180,8 @@ func main() {
 	idleTimeoutString := resolver_config.DefaultIdleTimeout.String()
 	keepAliveIntervalString := resolver_config.DefaultKeepAliveInterval.String()
 	requestTimeoutString := resolver_config.DefaultRequestTimeout.String()
+	maxInFlight := resolver_config.DefaultMaxInFlight
+	maxTcpConnections := defaultMaxTcpConnections
 
 	parser := &argumentParserPkg.Parser{
 		ProgramName: programName,
@@ -139,6 +199,8 @@ func main() {
 			option.NewStringOption('i', "idle-timeout", "idle timeout for surplus pooled connections, e.g. 30s (dot mode)", false, &idleTimeoutString),
 			option.NewStringOption('k', "keepalive-interval", "keep-alive ping interval for warm connections, e.g. 10s; 0 disables (dot mode)", false, &keepAliveIntervalString),
 			option.NewStringOption('t', "request-timeout", "time allowed to answer one request, upstream attempts included, e.g. 4s", false, &requestTimeoutString),
+			option.NewIntOption(0, "max-in-flight", "requests that may wait on the upstream at once; beyond it a request is answered SERVFAIL", false, &maxInFlight),
+			option.NewIntOption(0, "max-tcp-connections", "TCP client connections served at once", false, &maxTcpConnections),
 			option.NewStringOption('I', "info", "address:port for the diagnostic HTTP server (/metrics, /cache); omit to disable. Bind to loopback/LAN only", false, &infoAddress),
 		},
 	}
@@ -186,6 +248,20 @@ func main() {
 		logger.FatalWithExitingMessage(
 			"The max connections must be at least 1.",
 			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxConnections, maxConnections)),
+		)
+	}
+
+	if maxInFlight < 1 {
+		logger.FatalWithExitingMessage(
+			"The max in flight must be at least 1.",
+			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxInFlight, maxInFlight)),
+		)
+	}
+
+	if maxTcpConnections < 1 {
+		logger.FatalWithExitingMessage(
+			"The max TCP connections must be at least 1.",
+			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxTcpConnections, maxTcpConnections)),
 		)
 	}
 
@@ -259,6 +335,7 @@ func main() {
 		resolver_config.WithIdleTimeout(idleTimeout),
 		resolver_config.WithKeepAliveInterval(keepAliveInterval),
 		resolver_config.WithRequestTimeout(requestTimeout),
+		resolver_config.WithMaxInFlight(maxInFlight),
 	)
 	if err != nil {
 		logger.FatalWithExitingMessage(
@@ -390,10 +467,16 @@ func main() {
 		for _, transportProtocol := range []string{"udp", "tcp"} {
 			errGroup.Go(
 				func() error {
-					server := &dns.Server{Addr: listenAddress, Net: transportProtocol, Handler: dnsResolver}
-					if err := server.ListenAndServe(); err != nil {
+					server, err := newDnsServer(listenAddress, transportProtocol, dnsResolver, maxTcpConnections)
+					if err != nil {
+						return altshiftErrors.New(
+							fmt.Errorf("new dns server (%s): %w", transportProtocol, err),
+							listenAddress,
+						)
+					}
+					if err := serve(server); err != nil {
 						return altshiftErrors.NewWithTrace(
-							fmt.Errorf("dns server listen and serve (%s): %w", transportProtocol, err),
+							fmt.Errorf("serve (%s): %w", transportProtocol, err),
 							listenAddress,
 						)
 					}

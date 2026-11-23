@@ -27,6 +27,10 @@ const (
 	// the 5s a stub resolver waits by default, so the client hears SERVFAIL
 	// rather than nothing.
 	DefaultRequestTimeout = 4 * time.Second
+	// DefaultMaxInFlight bounds the requests waiting on the upstream at once.
+	// Each holds a goroutine and, while it has one, a pooled connection; a
+	// request beyond the bound is answered SERVFAIL straight away.
+	DefaultMaxInFlight = 256
 )
 
 // Config holds tunable resolver settings. It is assembled from a set of
@@ -45,6 +49,9 @@ type Config struct {
 	KeepAliveInterval time.Duration
 	// RequestTimeout bounds the handling of one request.
 	RequestTimeout time.Duration
+	// MaxInFlight bounds the requests waiting on the upstream at once; <= 0
+	// means no bound.
+	MaxInFlight int
 }
 
 // Option mutates a Config.
@@ -88,6 +95,13 @@ func WithRequestTimeout(requestTimeout time.Duration) Option {
 	}
 }
 
+// WithMaxInFlight sets how many requests may wait on the upstream at once.
+func WithMaxInFlight(maxInFlight int) Option {
+	return func(config *Config) {
+		config.MaxInFlight = maxInFlight
+	}
+}
+
 // New returns a Config populated with defaults, with the given Options applied
 // in order.
 func New(options ...Option) *Config {
@@ -97,6 +111,7 @@ func New(options ...Option) *Config {
 		MinIdleConnections: DefaultMinIdleConnections,
 		KeepAliveInterval:  DefaultKeepAliveInterval,
 		RequestTimeout:     DefaultRequestTimeout,
+		MaxInFlight:        DefaultMaxInFlight,
 	}
 	for _, option := range options {
 		if option != nil {

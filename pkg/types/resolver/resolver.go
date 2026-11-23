@@ -294,6 +294,7 @@ type resolverMetrics struct {
 	hostsAnswered    atomic.Uint64
 	upstreamErrors   atomic.Uint64
 	exchangeErrors   atomic.Uint64
+	overloadRejected atomic.Uint64
 }
 
 // Metrics is a point-in-time snapshot of the resolver counters plus the cache
@@ -308,6 +309,7 @@ type Metrics struct {
 	HostsAnswered    uint64      `json:"hosts_answered"`
 	UpstreamErrors   uint64      `json:"upstream_errors"`
 	ExchangeErrors   uint64      `json:"exchange_errors"`
+	OverloadRejected uint64      `json:"overload_rejected"`
 	Cache            cache.Stats `json:"cache"`
 }
 
@@ -331,9 +333,11 @@ type Resolver struct {
 	// RequestTimeout bounds the handling of one request; <= 0 means
 	// resolver_config.DefaultRequestTimeout.
 	RequestTimeout time.Duration
-	metrics        resolverMetrics
-	blocklistsMu   sync.Mutex
-	blocklists     atomic.Pointer[blocklistSet]
+	// forwardSlots bounds the requests waiting on the upstream at once.
+	forwardSlots chan struct{}
+	metrics      resolverMetrics
+	blocklistsMu sync.Mutex
+	blocklists   atomic.Pointer[blocklistSet]
 }
 
 // Metrics returns a snapshot of the resolver and cache counters.
@@ -348,6 +352,7 @@ func (r *Resolver) Metrics() Metrics {
 		HostsAnswered:    r.metrics.hostsAnswered.Load(),
 		UpstreamErrors:   r.metrics.upstreamErrors.Load(),
 		ExchangeErrors:   r.metrics.exchangeErrors.Load(),
+		OverloadRejected: r.metrics.overloadRejected.Load(),
 	}
 	if r.Cache != nil {
 		m.Cache = r.Cache.Stats()
@@ -543,6 +548,41 @@ func checkAnswer(query *dns.Msg, response *dns.Msg) error {
 	}
 
 	return nil
+}
+
+// forward sends query to the upstream over the configured transport.
+func (r *Resolver) forward(ctx context.Context, query *dns.Msg) (*dns.Msg, error) {
+	switch r.Mode {
+	case "dot":
+		return r.handleDot(ctx, query)
+	case "doq":
+		// RFC 9250 §4.2.1: a DoQ query's ID is zero.
+		query.Id = 0
+		return r.handleDoq(ctx, query)
+	default:
+		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, r.Mode))
+	}
+}
+
+// acquireForwardSlot takes one of the slots bounding the requests waiting on
+// the upstream, reporting false when all are taken. A resolver built without
+// New has no bound.
+func (r *Resolver) acquireForwardSlot() bool {
+	if r.forwardSlots == nil {
+		return true
+	}
+	select {
+	case r.forwardSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Resolver) releaseForwardSlot() {
+	if r.forwardSlots != nil {
+		<-r.forwardSlots
+	}
 }
 
 func (r *Resolver) handleDoq(ctx context.Context, request *dns.Msg) (*dns.Msg, error) {
@@ -763,31 +803,31 @@ func (r *Resolver) ServeDNS(responseWriter dns.ResponseWriter, request *dns.Msg)
 
 			query := newUpstreamQuery(question, do, request.CheckingDisabled)
 
-			var err error
-			switch r.Mode {
-			case "dot":
-				response, err = r.handleDot(ctxWithTlsDns, query)
-			case "doq":
-				// RFC 9250 §4.2.1: a DoQ query's ID is zero.
-				query.Id = 0
-				response, err = r.handleDoq(ctxWithTlsDns, query)
-			default:
-				slog.ErrorContext(
-					altshiftContext.WithError(
-						ctxWithTlsDns,
-						altshiftErrors.NewWithTrace(fmt.Errorf("%w: %s", dnsResolverErrors.ErrUnsupportedMode, r.Mode)),
-					),
+			// A request waiting on the upstream holds a slot until it is
+			// answered or its deadline passes. With every slot taken it is
+			// refused at once, rather than adding another goroutine to the
+			// queue for a pooled connection; what the cache, the hosts file
+			// or a blocklist can answer is still answered.
+			if !r.acquireForwardSlot() {
+				slog.WarnContext(
+					ctxWithTlsDns,
 					"",
 					makeEventGroup(
 						"dns_request_forward",
-						"Unsupported mode.",
+						"The limit on requests waiting on the upstream was reached.",
 						"failure",
-						"error",
+						"connection", "denied",
 					),
 				)
+				r.metrics.overloadRejected.Add(1)
+				r.metrics.responseServfail.Add(1)
 				writeErrorResponse(responseWriter, request, dns.RcodeServerFailure)
 				return
 			}
+			defer r.releaseForwardSlot()
+
+			var err error
+			response, err = r.forward(ctxWithTlsDns, query)
 
 			if err != nil {
 				slog.ErrorContext(
@@ -984,6 +1024,9 @@ func New(ctx context.Context, mode string, serverAddress string, serverName stri
 		Cache:           cache.New(),
 		Mode:            mode,
 		RequestTimeout:  config.RequestTimeout,
+	}
+	if config.MaxInFlight > 0 {
+		resolver.forwardSlots = make(chan struct{}, config.MaxInFlight)
 	}
 
 	switch mode {
