@@ -207,10 +207,12 @@ type testAddr struct{ network string }
 func (a testAddr) Network() string { return a.network }
 func (a testAddr) String() string  { return "192.0.2.7:5353" }
 
-// testWriter captures what ServeDNS writes back to the client.
+// testWriter captures what ServeDNS writes back to the client, and the length
+// of each message as it went onto the wire.
 type testWriter struct {
 	network string
 	msgs    []*dns.Msg
+	lengths []int
 }
 
 func (w *testWriter) LocalAddr() net.Addr  { return testAddr{w.network} }
@@ -227,6 +229,7 @@ func (w *testWriter) WriteMsg(m *dns.Msg) error {
 		return err
 	}
 	w.msgs = append(w.msgs, received)
+	w.lengths = append(w.lengths, len(packed))
 	return nil
 }
 func (w *testWriter) Write([]byte) (int, error) { return 0, nil }
@@ -244,12 +247,18 @@ func newQuery(name string, qtype uint16) *dns.Msg {
 // ask sends query to the resolver over network ("udp" or "tcp") and returns
 // the reply, or nil when none was written.
 func ask(r *Resolver, network string, query *dns.Msg) *dns.Msg {
+	reply, _ := askWire(r, network, query)
+	return reply
+}
+
+// askWire is ask, also returning the reply's length on the wire.
+func askWire(r *Resolver, network string, query *dns.Msg) (*dns.Msg, int) {
 	writer := &testWriter{network: network}
 	r.ServeDNS(writer, query)
 	if len(writer.msgs) == 0 {
-		return nil
+		return nil, 0
 	}
-	return writer.msgs[len(writer.msgs)-1]
+	return writer.msgs[len(writer.msgs)-1], writer.lengths[len(writer.lengths)-1]
 }
 
 func rcodeOf(m *dns.Msg) string {

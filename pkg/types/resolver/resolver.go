@@ -162,12 +162,20 @@ func newUpstreamQuery(question dns.Question, do bool, cd bool) *dns.Msg {
 	return query
 }
 
-// replyUDPSize is the EDNS payload size the resolver advertises in a reply.
+// maxUDPSize caps the size of a UDP reply whatever the client advertised.
+// 1232 is RFC 9715's value: the largest payload that fits an IPv6 datagram
+// without fragmenting on a 1280-byte path. A larger answer goes over TCP.
+const maxUDPSize = 1232
+
+// replyUDPSize is the largest UDP reply the asker of request is sent, and the
+// EDNS payload size the resolver advertises to it: what it advertised, held
+// between 512 (RFC 6891 §6.2.5) and maxUDPSize.
 func replyUDPSize(request *dns.Msg) uint16 {
-	if opt := request.IsEdns0(); opt != nil && opt.UDPSize() > dns.MinMsgSize {
-		return opt.UDPSize()
+	opt := request.IsEdns0()
+	if opt == nil {
+		return dns.MinMsgSize
 	}
-	return dns.MinMsgSize
+	return min(max(opt.UDPSize(), dns.MinMsgSize), maxUDPSize)
 }
 
 // setReplyEdns gives reply the OPT record the asker is owed: one when the

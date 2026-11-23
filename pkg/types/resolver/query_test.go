@@ -337,3 +337,69 @@ func TestServeDNS_ReplyEdns(t *testing.T) {
 		})
 	}
 }
+
+// A UDP reply is held to 1232 bytes (RFC 9715) whatever size the client
+// advertised, so a large answer goes over TCP rather than as a fragmented
+// datagram. The advertised size, up to 65535, used to be taken as given.
+func TestServeDNS_UdpReplySize(t *testing.T) {
+	t.Parallel()
+
+	const records = 120
+
+	answer := func(query *dns.Msg) *dns.Msg {
+		response := new(dns.Msg)
+		response.SetReply(query)
+		for i := range records {
+			response.Answer = append(response.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: query.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+				A:   net.IPv4(198, 51, 100, byte(i)).To4(),
+			})
+		}
+		return response
+	}
+
+	testCases := []struct {
+		name          string
+		network       string
+		udpSize       uint16
+		wantMaxLength int
+		wantTruncated bool
+	}{
+		{name: "udp without edns", network: "udp", wantMaxLength: dns.MinMsgSize, wantTruncated: true},
+		{name: "udp advertising 4096", network: "udp", udpSize: 4096, wantMaxLength: 1232, wantTruncated: true},
+		{name: "udp advertising 65535", network: "udp", udpSize: 65535, wantMaxLength: 1232, wantTruncated: true},
+		{name: "udp advertising 100", network: "udp", udpSize: 100, wantMaxLength: dns.MinMsgSize, wantTruncated: true},
+		{name: "tcp", network: "tcp", udpSize: 1232, wantMaxLength: dns.MaxMsgSize},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := startUpstream(t, answer)
+			resolver := newTestResolver(t, upstream)
+
+			request := newQuery("big.example.", dns.TypeA)
+			if testCase.udpSize != 0 {
+				request.SetEdns0(testCase.udpSize, false)
+			}
+			reply, length := askWire(resolver, testCase.network, request)
+			if reply == nil {
+				t.Fatal("no reply")
+			}
+
+			if length > testCase.wantMaxLength {
+				t.Fatalf("reply is %d bytes; want at most %d", length, testCase.wantMaxLength)
+			}
+			if reply.Truncated != testCase.wantTruncated {
+				t.Fatalf("reply TC = %t; want %t", reply.Truncated, testCase.wantTruncated)
+			}
+			if !testCase.wantTruncated && len(reply.Answer) != records {
+				t.Fatalf("reply carries %d answers; want all %d", len(reply.Answer), records)
+			}
+			if opt := reply.IsEdns0(); opt != nil && opt.UDPSize() > 1232 {
+				t.Fatalf("reply advertises a UDP size of %d; want at most 1232", opt.UDPSize())
+			}
+		})
+	}
+}
