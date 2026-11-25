@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"runtime"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -141,6 +142,83 @@ func TestNewDnsServer_TcpConnectionLimit(t *testing.T) {
 				t.Fatalf("second connection not served after the first closed: %v", err)
 			}
 		})
+	}
+}
+
+// A client that sends queries and reads none of the answers cannot hold its
+// slot of the TCP limit: once its window is full the server's write runs out of
+// time, the connection is closed, and a client waiting for a slot is served.
+// miekg/dns takes a write timeout but applies none, so the write used to block
+// for good, and as many such clients as the limit allows shut TCP out.
+func TestNewDnsServer_UnreadAnswersFreeTheirSlot(t *testing.T) {
+	t.Parallel()
+
+	const maxTcpConnections = 2
+
+	// An answer of about 50 KiB, so that a few fill what the sockets buffer.
+	text := strings.Repeat("x", 250)
+	handler := dns.HandlerFunc(func(writer dns.ResponseWriter, request *dns.Msg) {
+		reply := new(dns.Msg)
+		reply.SetReply(request)
+		for range 200 {
+			reply.Answer = append(reply.Answer, &dns.TXT{
+				Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+				Txt: []string{text},
+			})
+		}
+		_ = writer.WriteMsg(reply)
+	})
+
+	server, err := newDnsServer(t.Context(), "127.0.0.1:0", "tcp", handler, maxTcpConnections)
+	if err != nil {
+		t.Fatalf("new dns server: %v", err)
+	}
+	started := make(chan struct{})
+	server.NotifyStartedFunc = func() { close(started) }
+	go func() { _ = serve(server) }()
+	<-started
+	t.Cleanup(func() { _ = server.Shutdown() })
+
+	address := server.Listener.Addr().String()
+
+	query := new(dns.Msg)
+	query.SetQuestion("example.", dns.TypeTXT)
+
+	// Each takes a slot, sends its queries, and reads nothing, with as small a
+	// receive buffer as it can have.
+	dialer := net.Dialer{Control: func(_, _ string, rawConn syscall.RawConn) error {
+		var setErr error
+		if err := rawConn.Control(func(descriptor uintptr) {
+			setErr = syscall.SetsockoptInt(int(descriptor), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 2048)
+		}); err != nil {
+			return err
+		}
+		return setErr
+	}}
+	for range maxTcpConnections {
+		connection, err := dialer.DialContext(t.Context(), "tcp", address)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = connection.Close() })
+
+		dnsConnection := &dns.Conn{Conn: connection}
+		for range dnsMaxTcpQueries {
+			if err := dnsConnection.WriteMsg(query); err != nil {
+				t.Fatalf("write msg: %v", err)
+			}
+		}
+	}
+
+	var plainDialer net.Dialer
+	waiting, err := plainDialer.DialContext(t.Context(), "tcp", address)
+	if err != nil {
+		t.Fatalf("dial waiting: %v", err)
+	}
+	defer waiting.Close()
+
+	if err := exchangeOn(waiting, 3*dnsWriteTimeout); err != nil {
+		t.Fatalf("the waiting connection was not served: %v", err)
 	}
 }
 

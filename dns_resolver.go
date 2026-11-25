@@ -67,7 +67,6 @@ func newDnsServer(ctx context.Context, address string, network string, handler d
 		Net:           network,
 		Handler:       handler,
 		ReadTimeout:   dnsReadTimeout,
-		WriteTimeout:  dnsWriteTimeout,
 		IdleTimeout:   func() time.Duration { return dnsTcpIdleTimeout },
 		MaxTCPQueries: dnsMaxTcpQueries,
 	}
@@ -86,7 +85,10 @@ func newDnsServer(ctx context.Context, address string, network string, handler d
 		if err != nil {
 			return nil, altshiftErrors.NewWithTrace(fmt.Errorf("listen config listen: %w", err), address)
 		}
-		server.Listener = netutil.LimitListener(listener, maxTcpConnections)
+		server.Listener = &writeDeadlineListener{
+			Listener: netutil.LimitListener(listener, maxTcpConnections),
+			timeout:  dnsWriteTimeout,
+		}
 		socket = server.Listener
 	default:
 		return nil, altshiftErrors.NewWithTrace(fmt.Errorf("%w: %s", errUnsupportedNetwork, network), address)
@@ -105,6 +107,46 @@ func newDnsServer(ctx context.Context, address string, network string, handler d
 	})
 
 	return server, nil
+}
+
+// writeDeadlineListener gives each write on a connection it accepts a deadline,
+// and closes a connection whose write fails. miekg/dns takes a WriteTimeout but
+// never applies it, so a client that sends queries and reads none of the answers
+// would block a write once its window filled, and hold the connection, and with
+// it a slot of the TCP limit, for good: read and idle timeouts do not end a
+// write. A write that failed has left the stream mid-message, so the connection
+// is closed, which ends its queries and frees its slot.
+type writeDeadlineListener struct {
+	net.Listener
+	timeout time.Duration
+}
+
+func (listener *writeDeadlineListener) Accept() (net.Conn, error) {
+	conn, err := listener.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+
+	return &writeDeadlineConn{Conn: conn, timeout: listener.timeout}, nil
+}
+
+type writeDeadlineConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (conn *writeDeadlineConn) Write(data []byte) (int, error) {
+	if err := conn.SetWriteDeadline(time.Now().Add(conn.timeout)); err != nil {
+		_ = conn.Close()
+		return 0, err
+	}
+
+	written, err := conn.Conn.Write(data)
+	if err != nil {
+		_ = conn.Close()
+	}
+
+	return written, err
 }
 
 // serve runs server on the socket newDnsServer opened for it, until the socket
@@ -248,7 +290,9 @@ const programName = "dns_resolver"
 const (
 	// The defaults miekg/dns would apply anyway, stated so they are this
 	// program's: the time a TCP client has to send its first query, then
-	// between queries, and the queries one connection may carry.
+	// between queries, and the queries one connection may carry. The time an
+	// answer has to be written is applied by writeDeadlineListener, as miekg/dns
+	// applies none.
 	dnsReadTimeout    = 2 * time.Second
 	dnsWriteTimeout   = 2 * time.Second
 	dnsTcpIdleTimeout = 8 * time.Second
