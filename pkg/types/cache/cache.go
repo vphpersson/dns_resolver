@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Motmedel/dns_utils/pkg/dns_utils"
+	"github.com/altshiftab/dns_utils/pkg/dns_utils"
 	"github.com/miekg/dns"
 )
 

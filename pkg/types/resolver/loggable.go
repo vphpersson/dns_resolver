@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	dnsUtilsContext "github.com/Motmedel/dns_utils/pkg/context"
-	dnsUtilsTypes "github.com/Motmedel/dns_utils/pkg/types"
+	dnsUtilsContext "github.com/altshiftab/dns_utils/pkg/context"
+	dnsUtilsTypes "github.com/altshiftab/dns_utils/pkg/types"
 	"github.com/miekg/dns"
 )
 

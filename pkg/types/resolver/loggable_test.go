@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
+	motmedelDnsLog "github.com/altshiftab/dns_utils/pkg/log"
 	altshiftLog "github.com/altshiftab/utils_go/pkg/log"
 	"github.com/miekg/dns"
 )
@@ -127,6 +127,7 @@ func TestServeDNS_LogSize(t *testing.T) {
 
 // A reply refused for its question is not logged as what was answered: the
 // log would otherwise show the refused address as the event's answer.
+//
 //nolint:paralleltest // It swaps the default logger.
 func TestServeDNS_RejectedAnswerNotLogged(t *testing.T) {
 	sink := &lockedBuffer{}

@@ -1,7 +1,7 @@
-github.com/Motmedel/dns_utils v0.0.58 h1:S3xn1Y5UlLwKjwANy51iWhS0Wn3bU1WW0vy27ECV53c=
-github.com/Motmedel/dns_utils v0.0.58/go.mod h1:aXIEl547IWdHn5q2nqze+r3MlhaoPO97DxVMD33r4m4=
-github.com/Motmedel/dns_utils/pkg/quic v0.0.4 h1:MuVYkOCXMpnZMuWvW0AXpOM8bZd2kb7Ayw1cO4LtpKg=
-github.com/Motmedel/dns_utils/pkg/quic v0.0.4/go.mod h1:0/v3tPEtWBV+G90/HkrNDv5pIlhym6ibVsOXT7Z4Q1c=
+github.com/altshiftab/dns_utils v0.1.0 h1:O7tc2aVBqSlIbxbOXM/qC4KGbE0b6TAtkLgFyERMHJI=
+github.com/altshiftab/dns_utils v0.1.0/go.mod h1:GsZ1KUsUoiPjCFunbg/5BvkNTcEq66iPm7lGPzQYx1k=
+github.com/altshiftab/dns_utils/pkg/quic v0.1.0 h1:I3Ub4QpurtRcXVuO3w5Gx9W5z/hOkpbueYpzflXcMK4=
+github.com/altshiftab/dns_utils/pkg/quic v0.1.0/go.mod h1:j+WNYbwHzpbdPBiBprTa4rsUmdPhOy0QKJYaQjD9rbg=
 github.com/altshiftab/utils_go v1.134.0 h1:ML6RYVlXBkZpOZSkKkCzmKyQNMboHs4ZZOpFQSYEWzo=
 github.com/altshiftab/utils_go v1.134.0/go.mod h1:lNBqVAWMIhIISNz0pOQnsqRsCPg6S50Q62GH6slGBOk=
 github.com/fsnotify/fsnotify v1.10.1 h1:b0/UzAf9yR5rhf3RPm9gf3ehBPpf0oZKIjtpKrx59Ho=

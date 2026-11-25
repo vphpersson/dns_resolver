@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	motmedelDnsLog "github.com/Motmedel/dns_utils/pkg/log"
+	motmedelDnsLog "github.com/altshiftab/dns_utils/pkg/log"
 	argumentParserPkg "github.com/altshiftab/utils_go/pkg/cli/argument_parser"
 	argumentParserErrors "github.com/altshiftab/utils_go/pkg/cli/argument_parser/errors"
 	"github.com/altshiftab/utils_go/pkg/cli/argument_parser/option"
