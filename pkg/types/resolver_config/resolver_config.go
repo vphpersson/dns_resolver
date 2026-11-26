@@ -32,10 +32,12 @@ const (
 	// request beyond the bound is answered SERVFAIL straight away.
 	DefaultMaxInFlight = 256
 	// DefaultMaxInFlightPerClient bounds the requests one client has waiting
-	// on the upstream at once, so that one client keeping the upstream busy
-	// leaves room for the rest. It sits well below the connection count the
-	// deploy uses.
-	DefaultMaxInFlightPerClient = 16
+	// on the upstream at once; 0, the default, bounds nothing. A bound by
+	// address cannot tell apart the clients behind one: a host forwarding for
+	// its containers, or a NAT, shares it, and a browser loading a page alone
+	// asks more at once than the 16 it once was. MaxInFlight is what guards
+	// the resolver's own goroutines and memory.
+	DefaultMaxInFlightPerClient = 0
 )
 
 // Config holds tunable resolver settings. It is assembled from a set of

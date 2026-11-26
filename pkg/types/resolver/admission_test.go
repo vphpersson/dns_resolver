@@ -2,7 +2,9 @@ package resolver
 
 import (
 	"dns_resolver/pkg/types/resolver_config"
+	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,9 +89,59 @@ func TestServeDNS_InFlightLimit(t *testing.T) {
 	}
 }
 
-// One client may hold only so many forwards at once, so a client keeping the
-// upstream busy cannot make every other client's cache misses fail. The bound
-// was global and first come, first served.
+// By default one client may have as many forwards in flight as the global
+// bound allows. A bound of 16 per client answered SERVFAIL at once to a burst
+// of cache misses from one address, which a host forwarding for its
+// containers sends at every pass of a feed poller, and a browser on loading a
+// page.
+func TestServeDNS_NoInFlightLimitPerClientByDefault(t *testing.T) {
+	t.Parallel()
+
+	const burst = 24
+
+	upstream := startUpstream(t, func(query *dns.Msg) *dns.Msg {
+		if strings.HasPrefix(query.Question[0].Name, "slow") {
+			return nil
+		}
+		return answerWith("192.0.2.1")(query)
+	})
+	resolver := newTestResolver(
+		t,
+		upstream,
+		resolver_config.WithMaxConnections(2*burst),
+		resolver_config.WithRequestTimeout(2*time.Second),
+	)
+
+	slow := make(chan *dns.Msg, burst)
+	for i := range burst {
+		go func() {
+			slow <- askFrom(resolver, "udp", fmt.Sprintf("192.0.2.10:%d", 5000+i), newQuery(fmt.Sprintf("slow%d.example.", i), dns.TypeA))
+		}()
+	}
+	waitFor(t, "every slow query to reach the upstream", func() bool {
+		for i := range burst {
+			if upstream.receivedFor(fmt.Sprintf("slow%d.example.", i)) == 0 {
+				return false
+			}
+		}
+		return true
+	})
+
+	if reply := askFrom(resolver, "udp", "192.0.2.10:6000", newQuery("fast.example.", dns.TypeA)); reply == nil || reply.Rcode != dns.RcodeSuccess {
+		t.Fatalf("with %d forwards of its own in flight: rcode = %s; want NOERROR", burst, rcodeOf(reply))
+	}
+	if rejected := resolver.Metrics().ClientOverloadRejected; rejected != 0 {
+		t.Fatalf("client_overload_rejected = %d; want 0", rejected)
+	}
+
+	for range burst {
+		<-slow
+	}
+}
+
+// One client may hold only so many forwards at once, when a bound is set, so a
+// client keeping the upstream busy cannot make every other client's cache
+// misses fail. The bound was global and first come, first served.
 //
 //nolint:tparallel // The subtests share the one client's held slot, so they run in turn.
 func TestServeDNS_InFlightLimitPerClient(t *testing.T) {

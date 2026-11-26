@@ -394,7 +394,7 @@ func main() {
 			option.NewStringOption('k', "keepalive-interval", "keep-alive ping interval for warm connections, e.g. 10s; 0 disables (dot mode)", false, &keepAliveIntervalString),
 			option.NewStringOption('t', "request-timeout", "time allowed to answer one request, upstream attempts included, e.g. 4s", false, &requestTimeoutString),
 			option.NewIntOption(0, "max-in-flight", "requests that may wait on the upstream at once; beyond it a request is answered SERVFAIL", false, &maxInFlight),
-			option.NewIntOption(0, "max-in-flight-per-client", "requests one client may have waiting on the upstream at once; beyond it its requests are answered SERVFAIL", false, &maxInFlightPerClient),
+			option.NewIntOption(0, "max-in-flight-per-client", "requests one client may have waiting on the upstream at once, beyond which its requests are answered SERVFAIL; 0, the default, bounds nothing", false, &maxInFlightPerClient),
 			option.NewIntOption(0, "max-tcp-connections", "TCP client connections served at once", false, &maxTcpConnections),
 			option.NewIntOption(0, "cache-max-entries", "answers the cache holds at most; the least recently used go first", false, &cacheMaxEntries),
 			option.NewIntOption(0, "cache-max-bytes", "approximate memory the cached answers take at most, in bytes", false, &cacheMaxBytes),
@@ -455,9 +455,9 @@ func main() {
 		)
 	}
 
-	if maxInFlightPerClient < 1 {
+	if maxInFlightPerClient < 0 {
 		logger.FatalWithExitingMessage(
-			"The max in flight per client must be at least 1.",
+			"The max in flight per client must not be negative.",
 			altshiftErrors.NewWithTrace(fmt.Errorf("%w: %d", errInvalidMaxInFlight, maxInFlightPerClient)),
 		)
 	}
